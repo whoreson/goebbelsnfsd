@@ -1,9 +1,11 @@
 PROG=	unfsd
 
 OBJS=	src/main.o src/log.o src/xdr.o src/rpc.o src/net.o \
-	src/portmap.o src/nfs2.o src/nfs3.o src/mount.o
+	src/portmap.o src/nfs2.o src/nfs3.o src/mount.o \
+	src/conf.o src/fh.o src/fs.o src/nfs_common.o
 HDRS=	src/log.h src/xdr.h src/rpc.h src/types.h src/net.h \
-	src/portmap.h src/progs.h
+	src/portmap.h src/progs.h src/conf.h src/fh.h src/fs.h \
+	src/nfs_common.h
 
 CC?=	cc
 CFLAGS=	-std=gnu89 -O2 -g -Wall -Wextra -Wno-long-long \

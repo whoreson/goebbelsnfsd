@@ -2,13 +2,13 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "conf.h"
 #include "log.h"
 #include "net.h"
 #include "portmap.h"
@@ -33,15 +33,17 @@ handle_hup(void)
 	log_msg(L_INFO, "SIGHUP received");
 	if (log_reopen() < 0)
 	log_msg(L_ERR, "log reopen failed: %s", strerror(errno));
-	/* M2: reload the exports file here. */
+	if (conf_reload() < 0)
+	log_msg(L_WARN, "exports reload failed, keeping old config");
 }
 
 static void
 usage(void)
 {
 	fprintf(stderr,
-	    "usage: %s [-dv] [-l logfile] [-m mountport]\n"
+	    "usage: %s [-dv] [-e exports] [-l logfile] [-m mountport]\n"
 	    "  -d  run in background\n"
+	    "  -e  exports file (default /etc/exports)\n"
 	    "  -v  verbose: log each RPC call\n"
 	    "  -l  log to file (reopened on SIGHUP)\n"
 	    "  -m  MOUNT port (default %d)\n",
@@ -78,13 +80,15 @@ main(int argc, char **argv)
 {
 	struct sigaction sa;
 	const char *logfile = NULL;
+	const char *exports_file = NULL;
 	unsigned long mport = MOUNT_PORT_DEFAULT;
 	char *end;
 	int ch, background = 0, verbose = 0;
 
-	while ((ch = getopt(argc, argv, "dhl:m:v")) != -1) {
+	while ((ch = getopt(argc, argv, "de:hl:m:v")) != -1) {
 	switch (ch) {
 	case 'd': background = 1; break;
+	case 'e': exports_file = optarg; break;
 	case 'l': logfile = optarg; break;
 	case 'm':
 	mport = strtoul(optarg, &end, 10);
@@ -117,6 +121,11 @@ main(int argc, char **argv)
 	return 1;
 	}
 
+	if (conf_load(exports_file) < 0) {
+	log_msg(L_ERR, "failed to load exports");
+	return 1;
+	}
+
 	if (net_udp_open(NFS_PORT) < 0 ||
 	    net_udp_open((unsigned short)mport) < 0 ||
 	    net_tcp_open(NFS_PORT) < 0 ||
@@ -124,7 +133,7 @@ main(int argc, char **argv)
 	return 1;
 
 	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = on_signal;	/* no SA_RESTART: poll() must wake */
+	sa.sa_handler = on_signal;
 	sigemptyset(&sa.sa_mask);
 	(void)sigaction(SIGINT, &sa, NULL);
 	(void)sigaction(SIGTERM, &sa, NULL);
