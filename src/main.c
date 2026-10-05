@@ -118,7 +118,9 @@ main(int argc, char **argv)
 	}
 
 	if (net_udp_open(NFS_PORT) < 0 ||
-	    net_udp_open((unsigned short)mport) < 0)
+	    net_udp_open((unsigned short)mport) < 0 ||
+	    net_tcp_open(NFS_PORT) < 0 ||
+	    net_tcp_open((unsigned short)mport) < 0)
 	return 1;
 
 	memset(&sa, 0, sizeof(sa));
@@ -138,6 +140,10 @@ main(int argc, char **argv)
 	portmap_add(RPC_PROG_NFS, 3, IPPROTO_UDP, NFS_PORT);
 	portmap_add(RPC_PROG_MOUNT, 1, IPPROTO_UDP, (unsigned short)mport);
 	portmap_add(RPC_PROG_MOUNT, 3, IPPROTO_UDP, (unsigned short)mport);
+	portmap_add(RPC_PROG_NFS, 2, IPPROTO_TCP, NFS_PORT);
+	portmap_add(RPC_PROG_NFS, 3, IPPROTO_TCP, NFS_PORT);
+	portmap_add(RPC_PROG_MOUNT, 1, IPPROTO_TCP, (unsigned short)mport);
+	portmap_add(RPC_PROG_MOUNT, 3, IPPROTO_TCP, (unsigned short)mport);
 	if (portmap_commit() < 0)
 	return 1;
 
