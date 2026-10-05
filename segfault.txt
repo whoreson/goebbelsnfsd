@@ -1,0 +1,8 @@
+xdr_get_u32 (x=<value optimized out>) at src/xdr.c:54
+54              return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+(gdb) bt
+#0  xdr_get_u32 (x=<value optimized out>) at src/xdr.c:54
+#1  0x0000000000402b21 in rpc_handle (r=0x7fffffffe630, buf=<value optimized out>, len=<value optimized out>, reply=0xd55c40,
+    replymax=33792) at src/rpc.c:131
+#2  0x0000000000403240 in net_loop (quit=0x50a6d8, hup=0x50a6e0, on_hup=0x401f50 <handle_hup>) at src/net.c:186
+#3  0x0000000000401e71 in main (argc=<value optimized out>, argv=<value optimized out>) at src/main.c:160

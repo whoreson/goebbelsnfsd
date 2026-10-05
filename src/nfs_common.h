@@ -21,6 +21,8 @@
 #define NFSERR_INVAL	29
 #define NFSERR_NAMETOOLONG	63
 #define NFSERR_STALE	70
+#define NFSERR_ROFS	30
+#define NFSERR_NOTSUPP	10004
 
 /* NFSv2 file types */
 #define NFNF	0

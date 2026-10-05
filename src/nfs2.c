@@ -185,15 +185,29 @@ nfs2_lookup(struct req *r)
 	return PROC_OK;
 	}
 
-	/* Build full path */
-	snprintf(fullpath, sizeof(fullpath), "%s/%s", ex->path, name);
-
+	/* Resolve directory path from file handle, then append name */
+	{
+	int dfd;
+	char dirpath[MAX_PATH_LEN];
 	if (fh_decode(&dir_fh, &dir_kfh) < 0) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
+	dfd = fhopen(&dir_kfh, O_RDONLY);
+	if (dfd < 0) {
+	xdr_put_u32(&r->out, NFSERR_STALE);
+	return PROC_OK;
+	}
+	if (fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
+	(void)close(dfd);
+	xdr_put_u32(&r->out, NFSERR_IO);
+	return PROC_OK;
+	}
+	(void)close(dfd);
+	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
+	}
 
-	/* Check parent dir is accessible */
+	/* Check parent dir is accessible (dir_kfh already decoded above) */
 	nstat = fs_getattr(&dir_kfh, &attr);
 	if (nstat != NFS_OK) {
 xdr_put_u32(&r->out, nstat);
@@ -206,6 +220,7 @@ xdr_put_u32(&r->out, nstat);
 	}
 
 	/* Resolve the path */
+	log_msg(L_DEBUG, "LOOKUP: fullpath=%s", fullpath);
 	if (lgetfh(fullpath, &fh) < 0) {
 	xdr_put_u32(&r->out, NFSERR_NOENT);
 	return PROC_OK;
@@ -315,47 +330,48 @@ nfs2_read(struct req *r)
 
 	if (fh_decode(&nfh, &fh) < 0) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
-	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
 
 	nstat = fs_getattr(&fh, &attr);
 	if (nstat != NFS_OK) {
-xdr_put_u32(&r->out, nstat);
-	xdr_put_u32(&r->out, 0);
+	xdr_put_u32(&r->out, nstat);
 	return PROC_OK;
 	}
 	if (!S_ISREG(attr.mode)) {
 	xdr_put_u32(&r->out, NFSERR_INVAL);
-	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
 	/* Check read permission */
 	if (fs_access(&attr, r->uid, r->gid, 0400) < 0) {
 	xdr_put_u32(&r->out, NFSERR_ACCES);
-	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
 
 	fd = fhopen(&fh, O_RDONLY);
 	if (fd < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
-	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
-
+	{
+	struct stat fst;
+	(void)fstat(fd, &fst);
+	log_msg(L_DEBUG, "READ: fd=%d ino=%lu mode=%o size=%lu offset=%u count=%u", fd, (unsigned long)fst.st_ino, (unsigned)fst.st_mode, (unsigned long)fst.st_size, (unsigned)offset, (unsigned)count);
+	}
 	(void)lseek(fd, offset, SEEK_SET);
 	n = read(fd, buf, count);
 	(void)close(fd);
+	log_msg(L_DEBUG, "READ: fd=%d n=%d", fd, (int)n);
 	if (n < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
-	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
 	xdr_put_u32(&r->out, (uint32_t)n);
 	xdr_put_var(&r->out, buf, (size_t)n);
+	nfs2_enc_fattr(&r->out, &attr);
+	log_msg(L_DEBUG, "READ: ok n=%d pos=%zu", (int)n, xdr_pos(&r->out));
 	return PROC_OK;
 }
 
@@ -508,6 +524,22 @@ xdr_put_u32(&r->out, nstat);
 	}
 	log_msg(L_DEBUG, "READDIR: offset=%u count=%u", (unsigned)offset, (unsigned)count);
 
+	/* NFSv2 READDIR reply: nfsstat + entrylist */
+	xdr_put_u32(&r->out, NFS_OK);
+
+	/* Resolve directory path from file handle */
+	{
+	int dfd;
+	char dirpath[MAX_PATH_LEN];
+	dfd = fhopen(&fh, O_RDONLY);
+	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
+	(void)close(dfd);
+	xdr_put_u32(&r->out, 0);  /* more=0 */
+	xdr_put_u32(&r->out, 1);  /* eof */
+	return PROC_OK;
+	}
+	(void)close(dfd);
+
 	/*
 	 * FreeBSD NFSv2 READDIR reply format:
 	 *   for each entry:
@@ -519,41 +551,60 @@ xdr_put_u32(&r->out, nstat);
 	 * The client uses LOOKUP to get file handles for individual entries.
 	 */
 
-	while (!done) {
+	/*
+	 * Collect entries, then send them with correct next_cookie values.
+	 * Buffer up to 128 entries.
+	 */
+	{
+	struct {
+	uint32_t inode;
+	char nm[256];
+	} entries[128];
+	int nent = 0;
+
+	while (!done && nent < 128) {
 	char fullpath[MAX_PATH_LEN];
-	const struct export *ex = fh_lookup_export(&nfh);
-	uint32_t this_inode;
 	fhandle_t entry_fh_k;
 
 	rc = fs_readdir(dirp, &inode, name, sizeof(name));
 	if (rc != 0) {
 	done = 1;
 	eof_reached = 1;
-	continue;
+	break;
 	}
-	/* Include . and .. - the client needs them for cookie advancement */
-
-	/* Get handle for this entry (for validation, not sent in reply) */
-	snprintf(fullpath, sizeof(fullpath), "%s/%s", ex->path, name);
+	/* Skip entries we can't get a handle for */
+	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 	if (lgetfh(fullpath, &entry_fh_k) < 0)
 	continue;
 
-	this_inode = (uint32_t)inode;
+	entries[nent].inode = (uint32_t)inode;
+	strncpy(entries[nent].nm, name, sizeof(entries[nent].nm) - 1);
+	entries[nent].nm[sizeof(entries[nent].nm) - 1] = '\0';
+	nent++;
+	}
 
-	/* Check if entry fits within count */
+	/* Now send all buffered entries */
 	{
-	size_t entry_overhead = 4 + 4 + XDR_PAD(strlen(name)) + 4;
-	if (xdr_pos(&r->out) + entry_overhead > count + 24)
+	int ei;
+	for (ei = 0; ei < nent; ei++) {
+	uint32_t ni = entries[ei].inode;
+	const char *en = entries[ei].nm;
+	uint32_t next_inode = (ei + 1 < nent) ? entries[ei + 1].inode : ni;
+	size_t entry_overhead = 4 + 4 + XDR_PAD(strlen(en)) + 4;
+
+	if (xdr_pos(&r->out) + entry_overhead > count + 28) {
+	/* Entry doesn't fit, stop here but don't mark EOF */
 	done = 1;
-	else {
+	break;
+	}
 	/* more=1 */
 	xdr_put_u32(&r->out, 1);
 	/* cookie */
-	xdr_put_u32(&r->out, this_inode);
+	xdr_put_u32(&r->out, ni);
 	/* namelen + name (padded) */
-	xdr_put_string(&r->out, name);
+	xdr_put_string(&r->out, en);
 	/* next_cookie */
-	xdr_put_u32(&r->out, this_inode);
+	xdr_put_u32(&r->out, next_inode);
 	}
 	}
 	}
@@ -581,6 +632,7 @@ xdr_put_u32(&r->out, nstat);
 	}
 	log_msg(L_DEBUG, "READDIR: done=%d eof=%d pos=%zu", done, eof_reached, xdr_pos(&r->out));
 	return PROC_OK;
+	}  /* end dirpath scope */
 }
 
 static int
