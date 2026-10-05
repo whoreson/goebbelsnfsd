@@ -1,0 +1,12 @@
+# unfsd exports file
+#
+# Syntax: path [options]
+# Options:
+#   -ro              read-only
+#   -alldirs         allow mounts of subdirectories
+#   -maproot=USER    map root to USER (name or uid)
+#   -mapall=USER     map all UIDs/GIDs to USER
+#   -network ADDR    allow this network
+#   -mask ADDR       netmask for -network
+#
+/mnt/3 -network 10.0.0.0 -mask 255.0.0.0 -maproot=root -alldirs

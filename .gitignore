@@ -1,0 +1,5 @@
+*.o
+unfsd
+tests/xdr_test
+tests/probe_fh
+*.bak
