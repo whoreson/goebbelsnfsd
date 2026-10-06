@@ -107,7 +107,7 @@ nfs3_enc_fattr(struct xdr *x, const struct fs_fattr *attr)
 	xdr_put_u32(x, attr->rdev_spec[0]);
 	xdr_put_u32(x, attr->rdev_spec[1]);
 	/* fa_fsid (8 bytes) */
-	xdr_put_u64(x, attr->fileid);
+	xdr_put_u64(x, attr->fsid);
 	/* fa_fileid (8 bytes) */
 	xdr_put_u64(x, attr->fileid);
 	/* fa_atime (8 bytes: seconds + nseconds, both uint32) */

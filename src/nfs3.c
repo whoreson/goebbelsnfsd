@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
 
@@ -331,7 +332,12 @@ nfs3_read(struct req *r)
 
 	/* Read one extra byte to check for EOF */
 	{
-	uint8_t tmp[8192];
+	uint8_t *tmp = malloc(count + 1);
+	if (tmp == NULL) {
+	(void)close(fd);
+	xdr_put_u32(&r->out, NFSERR_IO);
+	return PROC_OK;
+	}
 	n = read(fd, tmp, count + 1);
 	if (n < 0)
 	n = 0;
@@ -342,9 +348,7 @@ nfs3_read(struct req *r)
 
 	/* reply: status + postop_attr + count + eof + data_len + data */
 	xdr_put_u32(&r->out, NFS_OK);
-	log_msg(L_DEBUG, "nfs3_read: about to enc_postop_attr");
 	enc_postop_attr(&r->out, &nfh);
-	log_msg(L_DEBUG, "nfs3_read: after enc_postop_attr pos=%zu", xdr_pos(&r->out));
 	{
 	size_t count_mark = xdr_pos(&r->out);
 	xdr_put_u32(&r->out, 0);  /* count, patch later */
@@ -353,7 +357,8 @@ nfs3_read(struct req *r)
 	xdr_put_fixed(&r->out, tmp, (size_t)n);  /* data */
 	xdr_patch_u32(&r->out, count_mark, (uint32_t)n);  /* patch count */
 	}
-	log_msg(L_DEBUG, "nfs3_read: done n=%d count=%u pos=%zu eof=%d", (int)n, (unsigned)count, xdr_pos(&r->out), is_eof);
+	free(tmp);
+	log_msg(L_DEBUG, "nfs3_read: done n=%d eof=%d", (int)n, is_eof);
 	}
 	return PROC_OK;
 }
