@@ -7,7 +7,6 @@
 #include <netinet/in.h>
 #include <stdint.h>
 
-#define MAX_EXPORTS	64
 #define MAX_PATH_LEN	1024
 #define MAX_GIDS	16
 

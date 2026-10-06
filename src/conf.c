@@ -12,8 +12,9 @@
 #include "conf.h"
 #include "log.h"
 
-static struct export exports[MAX_EXPORTS];
+static struct export *exports;
 static unsigned nexports;
+static unsigned exports_cap;
 static char exports_file[MAX_PATH_LEN] = "/etc/exports";
 
 static int
@@ -26,6 +27,19 @@ parse_addr(const char *s, struct in_addr *addr)
 	if (inet_pton(AF_INET, s, &sin.sin_addr) != 1)
 	return -1;
 	*addr = sin.sin_addr;
+	return 0;
+}
+
+static int
+exports_grow(void)
+{
+	struct export *new;
+	unsigned cap = exports_cap == 0 ? 16 : exports_cap * 2;
+	new = realloc(exports, cap * sizeof(*exports));
+	if (new == NULL)
+	return -1;
+	exports = new;
+	exports_cap = cap;
 	return 0;
 }
 
@@ -110,9 +124,11 @@ parse_exports(const char *path)
 	if (line[0] == '\0')
 	continue;
 
-	if (nexports >= MAX_EXPORTS) {
-	log_msg(L_WARN, "too many exports (max %d)", MAX_EXPORTS);
+	if (nexports >= exports_cap) {
+	if (exports_grow() < 0) {
+	log_msg(L_WARN, "cannot grow exports array");
 	break;
+	}
 	}
 
 	ex = &exports[nexports];
@@ -254,13 +270,12 @@ int
 
 conf_load(const char *path)
 {
-	unsigned i;
-
 	if (path != NULL)
 	(void)strcpy(exports_file, path);
 	nexports = 0;
-	for (i = 0; i < MAX_EXPORTS; i++)
-	memset(&exports[i], 0, sizeof(exports[i]));
+	exports_cap = 0;
+	free(exports);
+	exports = NULL;
 	return parse_exports(path);
 }
 
