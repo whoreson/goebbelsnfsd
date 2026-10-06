@@ -1,6 +1,8 @@
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <sys/un.h>
+#include <sys/socket.h>
 #include <fcntl.h>
 #include <string.h>
 #include <stdio.h>
@@ -1192,19 +1194,126 @@ nfs3_symlink(struct req *r)
 	return PROC_OK;
 }
 
-/* MKNOD - not supported on most systems */
+/* MKNOD - create FIFO, socket, or device special files */
 static int
 nfs3_mknod(struct req *r)
 {
-	struct nfs_fh nfh;
+	struct nfs_fh dir_nfh;
+	fhandle_t dir_fh;
+	struct fs_fattr pre_attr, post_attr, dir_post_attr;
+	char name[256];
+	char dirpath[512], fullpath[512];
+	fhandle_t fh_child;
+	struct nfs_fh child_nfh;
+	uint32_t type;
+	uint32_t new_mode, new_uid, new_gid;
+	int uid_set, gid_set;
 
-	if (dec_fh3(&r->in, &nfh) < 0)
+	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
-	if (fh_lookup_export(&nfh) == NULL) {
+	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	    !xdr_ok(&r->in))
+	return PROC_GARBAGE;
+	name[sizeof(name)-1] = '\0';
+
+	if (fh_lookup_export(&dir_nfh) == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	xdr_put_u32(&r->out, NFSERR_NOTSUPP);
+	if (fh_decode(&dir_nfh, &dir_fh) < 0 ||
+	    fs_getattr(&dir_fh, &pre_attr) != NFS_OK) {
+	xdr_put_u32(&r->out, NFSERR_STALE);
+	return PROC_OK;
+	}
+	if (fh_lookup_export(&dir_nfh)->ro) {
+	xdr_put_u32(&r->out, NFSERR_ROFS);
+	return PROC_OK;
+	}
+
+	type = xdr_get_u32(&r->in);
+	/* Only FIFO(7) and SOCK(6) are supported without privs */
+	if (type != 6 && type != 7) {
+	xdr_put_u32(&r->out, NFSERR_PERM);
+	return PROC_OK;
+	}
+
+	/* Decode sattr3 for pipe/socket attributes */
+	nfs3_decode_sattr3_mode_uid_gid(&r->in, &new_mode, &new_uid, &new_gid,
+	    &uid_set, &gid_set);
+	if (!xdr_ok(&r->in))
+	return PROC_GARBAGE;
+
+	if (nfs3_resolve_dirpath(&dir_nfh, dirpath, sizeof(dirpath)) < 0) {
+	xdr_put_u32(&r->out, NFSERR_IO);
+	return PROC_OK;
+	}
+	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
+
+	if (type == 7) {
+	/* FIFO */
+	if (mkfifo(fullpath, new_mode) < 0) {
+	xdr_put_u32(&r->out, nfs_errno(errno));
+	return PROC_OK;
+	}
+	} else {
+	/* UNIX socket: create, bind, close */
+	int sock = socket(PF_UNIX, SOCK_STREAM, 0);
+	struct sockaddr_un addr;
+
+	if (sock < 0) {
+	xdr_put_u32(&r->out, nfs_errno(errno));
+	return PROC_OK;
+	}
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strlcpy(addr.sun_path, fullpath, sizeof(addr.sun_path));
+	if (bind(sock, (struct sockaddr *)&addr,
+	    sizeof(addr.sun_family) + strlen(addr.sun_path)) < 0) {
+	(void)close(sock);
+	(void)unlink(fullpath);
+	xdr_put_u32(&r->out, nfs_errno(errno));
+	return PROC_OK;
+	}
+	(void)close(sock);
+	(void)chmod(fullpath, new_mode);
+	}
+
+	/* Set uid/gid if provided */
+	if (uid_set || gid_set) {
+	(void)chown(fullpath, uid_set ? new_uid : -1, gid_set ? new_gid : -1);
+	}
+
+	/* lgetfh fails on FIFOs/sockets; get attrs via stat */
+	{
+	struct stat st;
+	if (stat(fullpath, &st) < 0) {
+	xdr_put_u32(&r->out, NFSERR_IO);
+	return PROC_OK;
+	}
+	memset(&post_attr, 0, sizeof(post_attr));
+	post_attr.mode = st.st_mode;
+	post_attr.nlink = st.st_nlink;
+	post_attr.uid = st.st_uid;
+	post_attr.gid = st.st_gid;
+	post_attr.size = st.st_size;
+	post_attr.fileid = st.st_ino;
+	post_attr.atime_sec = st.st_atimespec.tv_sec;
+	post_attr.atime_usec = st.st_atimespec.tv_nsec / 1000;
+	post_attr.mtime_sec = st.st_mtimespec.tv_sec;
+	post_attr.mtime_usec = st.st_mtimespec.tv_nsec / 1000;
+	post_attr.ctime_sec = st.st_ctimespec.tv_sec;
+	post_attr.ctime_usec = st.st_ctimespec.tv_nsec / 1000;
+	}
+
+	(void)fs_getattr(&dir_fh, &dir_post_attr);
+
+	/* Reply: obj(post_op_fh3) + obj_attr(post_op_attr) + dir_wcc(wcc_data) */
+	/* handle_follows=0 so client does LOOKUP fallback for the new file */
+	xdr_put_u32(&r->out, NFS_OK);
+	xdr_put_u32(&r->out, 0); /* handle_follows = false */
+	enc_postop_attr_fattr(&r->out, &post_attr);
+	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	enc_postop_attr_fattr(&r->out, &dir_post_attr);
 	return PROC_OK;
 }
 
