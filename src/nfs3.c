@@ -20,7 +20,7 @@
 #define NFS3_MAXRDIR	32768
 
 static int nfs3_null(struct req *r) { (void)r; return PROC_OK; }
-static int nfs3_notimpl(struct req *r) { (void)r; return PROC_UNAVAIL; }
+static int __attribute__((unused)) nfs3_notimpl(struct req *r) { (void)r; return PROC_UNAVAIL; }
 
 /* NFSv3 file handle: opaque <NFSX_V3FHMAX> (len prefix + data) */
 static void
@@ -292,7 +292,6 @@ nfs3_read(struct req *r)
 	uint32_t count;
 	int fd;
 	ssize_t n;
-	size_t mark;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
@@ -330,34 +329,32 @@ nfs3_read(struct req *r)
 	return PROC_OK;
 	}
 
-	/* reply: status + postop_attr + count + data_len + data + eof */
-	xdr_put_u32(&r->out, NFS_OK);
-	log_msg(L_DEBUG, "nfs3_read: about to enc_postop_attr");
-	enc_postop_attr(&r->out, &nfh);
-	log_msg(L_DEBUG, "nfs3_read: after enc_postop_attr pos=%zu", xdr_pos(&r->out));
-	xdr_put_u32(&r->out, 0);  /* count, patch later */
-	mark = xdr_pos(&r->out);
-	xdr_put_u32(&r->out, 0);  /* data_len, patch later */
 	/* Read one extra byte to check for EOF */
-	n = read(fd, r->out.base + xdr_pos(&r->out), count + 1);
+	{
+	uint8_t tmp[8192];
+	n = read(fd, tmp, count + 1);
 	if (n < 0)
 	n = 0;
 	(void)close(fd);
-	/* Determine EOF before truncating */
 	int is_eof = (n <= (int)count);
 	if ((size_t)n > count)
 	n = count;
 
-	/* Patch count and data_len */
+	/* reply: status + postop_attr + count + eof + data_len + data */
+	xdr_put_u32(&r->out, NFS_OK);
+	log_msg(L_DEBUG, "nfs3_read: about to enc_postop_attr");
+	enc_postop_attr(&r->out, &nfh);
+	log_msg(L_DEBUG, "nfs3_read: after enc_postop_attr pos=%zu", xdr_pos(&r->out));
 	{
-	size_t datalen = (size_t)n;
-	xdr_patch_u32(&r->out, mark - 4, (uint32_t)datalen);
-	xdr_patch_u32(&r->out, mark, (uint32_t)datalen);
-	r->out.pos += datalen;
+	size_t count_mark = xdr_pos(&r->out);
+	xdr_put_u32(&r->out, 0);  /* count, patch later */
+	xdr_put_u32(&r->out, is_eof ? 1 : 0);  /* eof */
+	xdr_put_u32(&r->out, (uint32_t)n);  /* data_len */
+	xdr_put_fixed(&r->out, tmp, (size_t)n);  /* data */
+	xdr_patch_u32(&r->out, count_mark, (uint32_t)n);  /* patch count */
 	}
-	/* eof */
-	xdr_put_u32(&r->out, is_eof ? 1 : 0);
 	log_msg(L_DEBUG, "nfs3_read: done n=%d count=%u pos=%zu eof=%d", (int)n, (unsigned)count, xdr_pos(&r->out), is_eof);
+	}
 	return PROC_OK;
 }
 
