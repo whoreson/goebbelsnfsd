@@ -162,3 +162,16 @@ nfs3_enc_fsstat(struct xdr *x, const struct statfs *sf)
 	xdr_put_u64(x, sf->f_bsize);	/* maxtransfersize */
 	xdr_put_u64(x, 0);	/* max links (unknown) */
 }
+
+/* Encode pre_op_attr (wcc_attr: size + mtime + ctime) */
+void
+nfs3_enc_pre_op_attr(struct xdr *x, const struct fs_fattr *attr)
+{
+	xdr_put_u32(x, 1);  /* attributes_follow = true */
+	/* wcc_attr: size(8) + mtime(8) + ctime(8) */
+	xdr_put_u64(x, attr->size);
+	xdr_put_u32(x, (uint32_t)attr->mtime_sec);
+	xdr_put_u32(x, (uint32_t)attr->mtime_usec * 1000);
+	xdr_put_u32(x, (uint32_t)attr->ctime_sec);
+	xdr_put_u32(x, (uint32_t)attr->ctime_usec * 1000);
+}

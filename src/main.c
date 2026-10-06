@@ -16,6 +16,9 @@
 #include "rpc.h"
 #include "types.h"
 
+/* NFSv3 write verifier (8 bytes) */
+extern uint32_t nfs3_wverf[2];
+
 static volatile sig_atomic_t want_quit, want_hup;
 
 static void
@@ -125,6 +128,10 @@ main(int argc, char **argv)
 	log_msg(L_ERR, "failed to load exports");
 	return 1;
 	}
+
+	/* Generate NFSv3 write verifier */
+	nfs3_wverf[0] = (uint32_t)getpid() ^ (uint32_t)time(NULL);
+	nfs3_wverf[1] = (uint32_t)time(NULL);
 
 	if (net_udp_open(NFS_PORT) < 0 ||
 	    net_udp_open((unsigned short)mport) < 0 ||

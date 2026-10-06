@@ -25,6 +25,7 @@ extern const uint8_t nfs_pad;
 #define NFSERR_NAMETOOLONG	63
 #define NFSERR_STALE	70
 #define NFSERR_ROFS	30
+#define NFSERR_GARBAGE	31
 #define NFSERR_NOTSUPP	10004
 
 /* NFSv2 file types */
@@ -60,5 +61,8 @@ void nfs2_enc_statfs(struct xdr *x, const struct statfs *sf);
 
 /* Encode fsstat for v3 */
 void nfs3_enc_fsstat(struct xdr *x, const struct statfs *sf);
+
+/* Encode pre_op_attr (wcc_attr: size + mtime + ctime) */
+void nfs3_enc_pre_op_attr(struct xdr *x, const struct fs_fattr *attr);
 
 #endif

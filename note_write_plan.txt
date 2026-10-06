@@ -1,0 +1,153 @@
+NFSv3 Write Support Implementation Plan
+========================================
+
+REFERENCE: /data4/work/unfs3/nfs.c, attr.c, fh_cache.c
+RFC: RFC 1813 (NFSv3)
+
+OVERVIEW:
+- 12 write procedures to implement (currently all return NFSERR_ROFS)
+- All write procedures return wcc_data (before+after attributes) on success AND error
+- Export flag `ro` controls write access; default is ro=0 (writable)
+
+INFRASTRUCTURE CHANGES:
+
+1. conf.c: Parse "-ro" option (already exists). Ensure default ro=0.
+
+2. main.c: Generate writeverf3 (8 bytes) at startup:
+   - *(wverf+0) = pid ^ random()
+   - *(wverf+4) = time(NULL)
+   - Store in global for COMMIT and WRITE replies
+
+3. nfs_common.c/h: Add enc_pre_op_attr (wcc_attr encoding)
+
+4. nfs3.c: Add enc_postop_attr_fattr (encode from pre-computed fattr, not fh)
+   Add dec_sattr3 (decode sattr3 from XDR)
+   Add dec_sattrguard3 (decode sattrguard3)
+
+REPLY FORMATS (key):
+
+wcc_data = pre_op_attr + post_op_attr
+pre_op_attr = bool_t(4) + wcc_attr{size(8)+mtime(8)+ctime(8)} = 28 bytes (when true)
+post_op_attr = bool_t(4) + fattr3(84) = 88 bytes (when true)
+
+For SETATTR: nfsstat3 + wcc_data(obj_wcc)
+For WRITE:   nfsstat3 + wcc_data(file_wcc) + count(4) + committed(4) + verf(8)
+For COMMIT:  nfsstat3 + wcc_data(file_wcc) + verf(8)
+For CREATE:  nfsstat3 + wcc_data(dir_wcc) + post_op_fh3(obj) + post_op_attr(obj_attr)
+For MKDIR:   same as CREATE
+For SYMLINK: same as CREATE
+For MKNOD:   same as CREATE
+For REMOVE:  nfsstat3 + wcc_data(dir_wcc)
+For RMDIR:   nfsstat3 + wcc_data(dir_wcc)
+For RENAME:  nfsstat3 + wcc_data(fromdir_wcc) + wcc_data(todir_wcc)
+For LINK:    nfsstat3 + wcc_data(linkdir_wcc) + post_op_attr(obj_attr)
+
+sattr3 fields (all optional with bool_t set_it):
+  mode, uid, gid, size, atime, mtime
+sattrguard3 = obj_size(size3) + mtime(nfstime3)
+
+createhow3 = { mode(createmode3: UNCHECKED=0,GUARDED=1,EXCLUSIVE=2),
+               union { sattr3 obj_attributes; createverf3 verf } }
+
+stable_how: UNSTABLE(0), DATASYNC(1), FILESYNC(2)
+committed: UNSTABLE(0), DATASYNC(1), FILESYNC(2), ONSTABLE(3)
+
+IMPLEMENTATION PHASES:
+
+Phase 1: SETATTR (proc 2)
+  - Decode fh + sattr3 + sattrguard3
+  - Resolve path from fh_path_cache
+  - Encode pre_op_attr (get current attrs)
+  - If guard set: verify size+mtime match
+  - Apply: ftruncate/fchmod/fchown via path (we have path from cache)
+    For symlinks: lchown, not fchown
+  - Apply: utimes/lutimes for atime/mtime
+  - Encode post_op_attr (get new attrs)
+  - Return wcc_data
+
+Phase 2: WRITE (proc 7)
+  - Decode fh + offset + count + stable_how + data
+  - Resolve path from fh_path_cache
+  - Open file O_WRONLY (no O_APPEND for NFS)
+  - lseek to offset, pwrite data
+  - If FILESYNC: fsync() before close
+  - Encode wcc_data + count + committed + verf
+  - NOTE: Our path-based approach means we don't need fhopen for writes
+
+Phase 3: COMMIT (proc 21)
+  - Decode fh + offset + count
+  - Open file, fsync(), close
+  - Return wcc_data + verf
+
+Phase 4: CREATE (proc 8)
+  - Decode dir fh + name + createhow3
+  - Resolve parent dir path from fh_path_cache
+  - Get pre_attr for parent dir
+  - UNCHECKED: open(O_CREAT|O_RDWR|O_TRUNC)
+  - GUARDED: open(O_CREAT|O_EXCL|O_RDWR|O_TRUNC), error if exists
+  - EXCLUSIVE: open(O_CREAT|O_EXCL|O_RDWR), store verifier in atime+mtime
+    On EEXIST: check verifier, if match return success
+  - Cache new fh + path
+  - Return dir_wcc + obj fh + obj_attr
+
+Phase 5: MKDIR (proc 9)
+  - mkdir() + cache + return dir_wcc + obj fh + obj_attr
+
+Phase 6: SYMLINK (proc 10)
+  - Decode symlink target + symlink attributes
+  - symlink() + cache + return
+
+Phase 7: REMOVE (proc 12)
+  - Decode dir fh + name
+  - Resolve parent path, construct full path
+  - unlink() + dir wcc_data
+
+Phase 8: RMDIR (proc 13)
+  - rmdir() + dir wcc_data
+
+Phase 9: RENAME (proc 14)
+  - Decode from{dir,name} + to{dir,name}
+  - Resolve both parent paths
+  - rename() + both dir wcc_data
+
+Phase 10: LINK (proc 15)
+  - Decode file fh + link{dir,name}
+  - Resolve both paths
+  - link() + linkdir wcc_data + obj_attr
+
+Phase 11: MKNOD (proc 11) - optional, can return NOTSUPP
+
+KEY IMPLEMENTATION NOTES:
+
+1. Path resolution: All write ops need path from fh_path_cache
+   - Parent dir: fhopen + fchdir + getcwd (as we do for READDIR)
+   - Child: parent_path + "/" + name
+   - Cache new fh + path after create
+
+2. Attribute handling:
+   - pre_op_attr: always get before modifying (for wcc_data)
+   - post_op_attr: get after modifying
+   - sattr3: apply mode/uid/gid/size/atime/mtime individually
+
+3. Guard checking (SETATTR):
+   - If guard.obj_size set: check current size matches
+   - If guard.mtime set: check current mtime matches
+
+4. Stable write handling:
+   - UNSTABLE: write, no fsync
+   - DATASYNC: write, fsync data only (fdatasync if available)
+   - FILESYNC: write, fsync file (fsync)
+   - We can simplify: always treat as FILESYNC (fsync before close)
+
+5. File descriptor management:
+   - No fd caching initially (open/close per operation)
+   - Write: open O_WRONLY, pwrite, fsync if FILESYNC, close
+
+6. Error mapping:
+   - Standard errno -> nfsstat3 mapping in nfs_errno()
+
+KNOWN LIMITATIONS:
+- No credential/permission checking (all operations as root)
+- No lockd/NLM support
+- No pNFS/delegations
+- No id mapping
