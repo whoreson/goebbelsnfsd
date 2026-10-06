@@ -1105,10 +1105,12 @@ xdr_put_u32(&r->out, nstat);
 	entries[nent].nm[sizeof(entries[nent].nm) - 1] = '\0';
 	nent++;
 	}
+	log_msg(L_DEBUG, "READDIR: read %d entries from dir", nent);
 
 	/* Now send all buffered entries */
 	{
 	int ei;
+	int encoded_all = 1;
 	for (ei = 0; ei < nent; ei++) {
 	uint32_t ni = entries[ei].inode;
 	const char *en = entries[ei].nm;
@@ -1116,8 +1118,9 @@ xdr_put_u32(&r->out, nstat);
 	size_t entry_overhead = 4 + 4 + XDR_PAD(strlen(en)) + 4;
 
 	if (xdr_pos(&r->out) + entry_overhead > count + 28) {
-	/* Entry doesn't fit, stop here but don't mark EOF */
+	/* Entry doesn't fit, stop here */
 	done = 1;
+	encoded_all = 0;
 	break;
 	}
 	/* more=1 */
@@ -1129,6 +1132,9 @@ xdr_put_u32(&r->out, nstat);
 	/* next_cookie */
 	xdr_put_u32(&r->out, next_inode);
 	}
+	/* If we didn't encode all buffered entries, there are more available */
+	if (!encoded_all)
+	eof_reached = 0;
 	}
 	}
 
