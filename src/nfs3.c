@@ -948,7 +948,6 @@ nfs3_create(struct req *r)
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
-
 	if (fh_lookup_export(&dir_nfh) == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
@@ -1215,7 +1214,6 @@ nfs3_mknod(struct req *r)
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
-
 	if (fh_lookup_export(&dir_nfh) == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
@@ -1259,6 +1257,7 @@ nfs3_mknod(struct req *r)
 	/* UNIX socket: create, bind, close */
 	int sock = socket(PF_UNIX, SOCK_STREAM, 0);
 	struct sockaddr_un addr;
+	socklen_t bindlen;
 
 	if (sock < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
@@ -1267,8 +1266,8 @@ nfs3_mknod(struct req *r)
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
 	strlcpy(addr.sun_path, fullpath, sizeof(addr.sun_path));
-	if (bind(sock, (struct sockaddr *)&addr,
-	    sizeof(addr.sun_family) + strlen(addr.sun_path)) < 0) {
+	bindlen = SUN_LEN(&addr);
+	if (bind(sock, (struct sockaddr *)&addr, bindlen) < 0) {
 	(void)close(sock);
 	(void)unlink(fullpath);
 	xdr_put_u32(&r->out, nfs_errno(errno));
