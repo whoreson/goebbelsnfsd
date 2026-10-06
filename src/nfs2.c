@@ -163,6 +163,7 @@ nfs2_lookup(struct req *r)
 	const struct export *ex;
 	char name[NFS2_MAXPATHLEN + 1];
 	char fullpath[MAX_PATH_LEN];
+	char dirpath[MAX_PATH_LEN];
 	size_t nlen;
 	uint32_t nstat;
 
@@ -180,15 +181,9 @@ nfs2_lookup(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_INVAL);
 	return PROC_OK;
 	}
-	if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
-	xdr_put_u32(&r->out, NFSERR_NOENT);
-	return PROC_OK;
-	}
-
 	/* Resolve directory path from file handle, then append name */
 	{
 	int dfd;
-	char dirpath[MAX_PATH_LEN];
 	if (fh_decode(&dir_fh, &dir_kfh) < 0) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
@@ -219,38 +214,68 @@ xdr_put_u32(&r->out, nstat);
 	return PROC_OK;
 	}
 
-	/* Resolve the path */
+	/* Handle . and .. specially */
+	if (name[0] == '.' && name[1] == '\0') {
+	memcpy(&fh, &dir_kfh, sizeof(fh));
+	} else if (name[0] == '.' && name[1] == '.' && name[2] == '\0') {
+	if (dirpath[1] == '\0') {
+	memcpy(&fh, &dir_kfh, sizeof(fh));
+	} else {
+	char *slash = strrchr(dirpath, '/');
+	if (slash == dirpath) {
+	if (lgetfh("/", &fh) < 0) {
+	xdr_put_u32(&r->out, NFSERR_NOENT);
+	return PROC_OK;
+	}
+	} else {
+	*slash = '\0';
+	if (lgetfh(dirpath, &fh) < 0) {
+	*slash = '/';
+	xdr_put_u32(&r->out, NFSERR_NOENT);
+	return PROC_OK;
+	}
+	*slash = '/';
+	}
+	}
+	} else {
 	log_msg(L_DEBUG, "LOOKUP: fullpath=%s", fullpath);
 	if (lgetfh(fullpath, &fh) < 0) {
 	xdr_put_u32(&r->out, NFSERR_NOENT);
 	return PROC_OK;
 	}
-	/* Verify same filesystem */
-	{
-	fhandle_t dir_fh_k;
-	if (fh_decode(&dir_fh, &dir_fh_k) < 0) {
-	xdr_put_u32(&r->out, NFSERR_NOENT);
-	return PROC_OK;
-	}
-	if (fh.fh_fsid.val[0] != dir_fh_k.fh_fsid.val[0] ||
-	    fh.fh_fsid.val[1] != dir_fh_k.fh_fsid.val[1]) {
-	xdr_put_u32(&r->out, NFSERR_NOENT);
-	return PROC_OK;
-	}
 	}
 
-	/* Get attributes of the result */
-	nstat = fs_getattr(&fh, &attr);
-	if (nstat != NFS_OK) {
-xdr_put_u32(&r->out, nstat);
+	/* Get attributes - use lstat to not follow symlinks */
+	{
+	struct stat sb;
+	if (lstat(fullpath, &sb) < 0) {
+	xdr_put_u32(&r->out, NFSERR_NOENT);
 	return PROC_OK;
+	}
+	memset(&attr, 0, sizeof(attr));
+	attr.mode = sb.st_mode;
+	attr.nlink = sb.st_nlink;
+	attr.uid = sb.st_uid;
+	attr.gid = sb.st_gid;
+	attr.size = sb.st_size;
+	attr.used = sb.st_blocks;
+	attr.fileid = sb.st_ino;
+	attr.atime_sec = sb.st_atimespec.tv_sec;
+	attr.atime_usec = sb.st_atimespec.tv_nsec / 1000;
+	attr.mtime_sec = sb.st_mtimespec.tv_sec;
+	attr.mtime_usec = sb.st_mtimespec.tv_nsec / 1000;
+	attr.ctime_sec = sb.st_ctimespec.tv_sec;
+	attr.ctime_usec = sb.st_ctimespec.tv_nsec / 1000;
 	}
 
 	/* Encode reply: status, fh, fattr */
 	xdr_put_u32(&r->out, NFS_OK);
 	fh_encode(&dir_fh, &fh);
+	/* Cache the path for READLINK (fhopen follows symlinks) */
+	fh_path_cache_add(&dir_fh, fullpath);
 	enc_fh(&r->out, &dir_fh);
 	nfs2_enc_fattr(&r->out, &attr);
+	log_msg(L_DEBUG, "LOOKUP: reply ok pos=%zu", xdr_pos(&r->out));
 	return PROC_OK;
 }
 
@@ -261,9 +286,8 @@ nfs2_readlink(struct req *r)
 	fhandle_t fh;
 	char buf[1024];
 	ssize_t n;
-	uint32_t nstat;
-	struct fs_fattr attr;
-	int fd;
+	const char *cpath;
+	struct stat sb;
 
 	if (dec_fh(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
@@ -276,23 +300,33 @@ nfs2_readlink(struct req *r)
 	return PROC_OK;
 	}
 
-	nstat = fs_getattr(&fh, &attr);
-	if (nstat != NFS_OK) {
-xdr_put_u32(&r->out, nstat);
+	/* Look up the cached path from LOOKUP */
+	cpath = fh_path_cache_get(&nfh);
+	if (cpath == NULL) {
+	/* Fallback: try fhopen + fchdir + getcwd (works for dirs) */
+	int rfd = fhopen(&fh, O_RDONLY);
+	if (rfd >= 0 && fchdir(rfd) == 0) {
+	char tmp[1024];
+	if (getcwd(tmp, sizeof(tmp)) != NULL) {
+	cpath = tmp; /* XXX: stack lifetime issue - not safe */
+	}
+	}
+	(void)close(rfd);
+	if (cpath == NULL) {
+	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (!S_ISLNK(attr.mode)) {
-	xdr_put_u32(&r->out, NFSERR_INVAL);
-	return PROC_OK;
 	}
 
-	fd = fhopen(&fh, O_RDONLY);
-	if (fd < 0) {
+	if (lstat(cpath, &sb) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
 	}
-	n = readlinkat(fd, ".", buf, sizeof(buf) - 1);
-	(void)close(fd);
+	if (!S_ISLNK(sb.st_mode)) {
+	xdr_put_u32(&r->out, NFSERR_NXIO);
+	return PROC_OK;
+	}
+	n = readlink(cpath, buf, sizeof(buf) - 1);
 	if (n < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
@@ -353,24 +387,22 @@ nfs2_read(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
 	}
-	{
-	struct stat fst;
-	(void)fstat(fd, &fst);
-	log_msg(L_DEBUG, "READ: fd=%d ino=%lu mode=%o size=%lu offset=%u count=%u", fd, (unsigned long)fst.st_ino, (unsigned)fst.st_mode, (unsigned long)fst.st_size, (unsigned)offset, (unsigned)count);
-	}
 	(void)lseek(fd, offset, SEEK_SET);
 	n = read(fd, buf, count);
 	(void)close(fd);
-	log_msg(L_DEBUG, "READ: fd=%d n=%d", fd, (int)n);
 	if (n < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
-	xdr_put_u32(&r->out, (uint32_t)n);
-	xdr_put_var(&r->out, buf, (size_t)n);
 	nfs2_enc_fattr(&r->out, &attr);
+	xdr_put_u32(&r->out, (uint32_t)n);
+	xdr_put_fixed(&r->out, buf, (size_t)n);
+	/* pad to 4-byte boundary */
+	{ size_t rem = (4 - ((size_t)n & 3)) & 3;
+	xdr_put_fixed(&r->out, &nfs_pad, rem);
+	}
 	log_msg(L_DEBUG, "READ: ok n=%d pos=%zu", (int)n, xdr_pos(&r->out));
 	return PROC_OK;
 }

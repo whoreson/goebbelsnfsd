@@ -6,6 +6,9 @@
 #include "fs.h"
 #include "xdr.h"
 
+/* Zero byte used for padding */
+extern const uint8_t nfs_pad;
+
 /* NFSv2/nfsstat values */
 #define NFS_OK	0
 #define NFSERR_PERM	1

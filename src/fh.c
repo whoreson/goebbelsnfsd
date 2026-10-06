@@ -1,8 +1,47 @@
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/param.h>
 
 #include "fh.h"
 #include "conf.h"
+
+/* Simple LRU path cache for symlinks */
+#define FH_PATH_CACHE_SIZE 64
+static struct {
+	struct nfs_fh key;
+	char path[256];
+} fh_path_cache[FH_PATH_CACHE_SIZE];
+
+void
+fh_path_cache_add(const struct nfs_fh *nfh, const char *path)
+{
+	size_t i, empty = (size_t)-1;
+	/* Check if already exists */
+	for (i = 0; i < FH_PATH_CACHE_SIZE; i++) {
+	if (fh_path_cache[i].path[0] == '\0' && empty == (size_t)-1)
+	empty = i;
+	if (memcmp(&fh_path_cache[i].key, nfh, sizeof(*nfh)) == 0) {
+	strlcpy(fh_path_cache[i].path, path, sizeof(fh_path_cache[i].path));
+	return;
+	}
+	}
+	/* Add new entry */
+	if (empty == (size_t)-1)
+	empty = 0; /* Evict oldest */
+	memcpy(&fh_path_cache[empty].key, nfh, sizeof(*nfh));
+	strlcpy(fh_path_cache[empty].path, path, sizeof(fh_path_cache[empty].path));
+}
+
+const char *
+fh_path_cache_get(const struct nfs_fh *nfh)
+{
+	size_t i;
+	for (i = 0; i < FH_PATH_CACHE_SIZE; i++) {
+	if (memcmp(&fh_path_cache[i].key, nfh, sizeof(*nfh)) == 0)
+	return fh_path_cache[i].path;
+	}
+	return NULL;
+}
 
 int
 fh_encode(struct nfs_fh *nfh, const fhandle_t *fh)

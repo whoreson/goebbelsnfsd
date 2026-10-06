@@ -5,6 +5,9 @@
 #include "nfs_common.h"
 #include "types.h"
 
+/* Zero byte used for padding */
+const uint8_t nfs_pad = 0;
+
 uint32_t
 nfs_mode_to_type(uint32_t mode)
 {

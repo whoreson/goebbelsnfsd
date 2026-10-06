@@ -294,7 +294,7 @@ nfs3_read(struct req *r)
 	return PROC_OK;
 	}
 
-	/* reply: status + postop_attr + count + data_len + data */
+	/* reply: status + postop_attr + count + data_len + data + eof */
 	xdr_put_u32(&r->out, NFS_OK);
 	enc_postop_attr(&r->out, &nfh);
 	xdr_put_u32(&r->out, 0);  /* count, patch later */
@@ -315,6 +315,8 @@ nfs3_read(struct req *r)
 	/* advance past data */
 	r->out.pos += datalen;
 	}
+	/* eof */
+	xdr_put_u32(&r->out, (n < (int)count) ? 1 : 0);
 	return PROC_OK;
 }
 
