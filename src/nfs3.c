@@ -1007,13 +1007,16 @@ nfs3_create(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
+	/* Get updated directory attributes for WCC */
+	struct fs_fattr dir_post_attr;
+	(void)fs_getattr(&dir_fh, &dir_post_attr);
 
 	xdr_put_u32(&r->out, NFS_OK);
 	/* CREATE3resok: obj(post_op_fh3) + obj_attr(post_op_attr) + dir_wcc(wcc_data) */
 	enc_postop_fh3(&r->out, &child_nfh);
 	enc_postop_attr_fattr(&r->out, &post_attr);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
-	enc_postop_attr_fattr(&r->out, &post_attr);
+	enc_postop_attr_fattr(&r->out, &dir_post_attr);
 	return PROC_OK;
 }
 
@@ -1084,13 +1087,15 @@ nfs3_mkdir(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
+	struct fs_fattr dir_post_attr;
+	(void)fs_getattr(&dir_fh, &dir_post_attr);
 
 	xdr_put_u32(&r->out, NFS_OK);
 	/* MKDIR3resok: obj(post_op_fh3) + obj_attr(post_op_attr) + dir_wcc(wcc_data) */
 	enc_postop_fh3(&r->out, &child_nfh);
 	enc_postop_attr_fattr(&r->out, &post_attr);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
-	enc_postop_attr_fattr(&r->out, &post_attr);
+	enc_postop_attr_fattr(&r->out, &dir_post_attr);
 	log_msg(L_DEBUG, "nfs3_mkdir: success");
 	return PROC_OK;
 }
@@ -1174,13 +1179,15 @@ nfs3_symlink(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
+	struct fs_fattr dir_post_attr;
+	(void)fs_getattr(&dir_fh, &dir_post_attr);
 
 	xdr_put_u32(&r->out, NFS_OK);
 	/* SYMLINK3resok: obj(post_op_fh3) + obj_attr(post_op_attr) + dir_wcc(wcc_data) */
 	enc_postop_fh3(&r->out, &child_nfh);
 	enc_postop_attr_fattr(&r->out, &post_attr);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
-	enc_postop_attr_fattr(&r->out, &post_attr);
+	enc_postop_attr_fattr(&r->out, &dir_post_attr);
 	log_msg(L_DEBUG, "nfs3_symlink: success");
 	return PROC_OK;
 }
