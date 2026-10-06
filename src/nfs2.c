@@ -513,7 +513,6 @@ nfs2_write(struct req *r)
 	uint8_t *wbuf;
 	size_t wsize;
 
-	log_msg(L_DEBUG, "WRITE: start pos=%zu left=%zu", r->in.pos, xdr_left(&r->in));
 	if (dec_fh(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
 	if (fh_lookup_export(&nfh) == NULL) {
@@ -528,12 +527,13 @@ nfs2_write(struct req *r)
 	xdr_put_u32(&r->out, 0); xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
+	/* NFSv2 WRITE request: fh + beginoffset(4) + offset(4) + totalcount(4) + data_len(4) + data */
+	(void)xdr_get_u32(&r->in);  /* beginoffset */
 	offset = xdr_get_u32(&r->in);
+	(void)xdr_get_u32(&r->in);  /* totalcount */
 	count = xdr_get_u32(&r->in);
-	stable = xdr_get_u32(&r->in);
 	if (!xdr_ok(&r->in))
 	return PROC_GARBAGE;
-	(void)stable;
 
 	cpath = fh_path_cache_get(&nfh);
 	if (cpath == NULL) {
