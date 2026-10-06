@@ -211,10 +211,10 @@ parse_exports(const char *path)
 	continue;
 	}
 	} else {
-	/* Bare network address (e.g. 10.0.0.0) */
+	/* Bare address (host or network) */
 	if (parse_addr(tok, &ex->net) == 0) {
-	/* Default mask: treat as /24 */
-	ex->mask.s_addr = htonl(0xFFFFFF00u);
+	/* Default mask: treat as single host (/32) */
+	ex->mask.s_addr = 0xFFFFFFFFu;
 	} else {
 	log_msg(L_WARN, "unknown option: %s", tok);
 	}
