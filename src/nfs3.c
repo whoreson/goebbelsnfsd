@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <errno.h>
 
 #include "progs.h"
@@ -49,7 +50,9 @@ enc_postop_attr(struct xdr *x, const struct nfs_fh *nfh)
 	}
 	fhandle_t fh;
 	struct fs_fattr attr;
-	if (fh_decode(nfh, &fh) >= 0 && fs_getattr(&fh, &attr) == NFS_OK) {
+	int ok = fh_decode(nfh, &fh) >= 0 && fs_getattr(&fh, &attr) == NFS_OK;
+	log_msg(L_DEBUG, "enc_postop_attr: ok=%d", ok);
+	if (ok) {
 	xdr_put_u32(x, 1);
 	nfs3_enc_fattr(x, &attr);
 	} else {
@@ -124,11 +127,11 @@ nfs3_lookup(struct req *r)
 {
 	struct nfs_fh nfh;
 	fhandle_t fh, fh_child;
-	const struct export *ex;
 	struct nfs_fh child_nfh;
 	char name[256];
-	uint32_t nstat;
+	char dirpath[512];
 	char fullpath[512];
+	int dfd;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
@@ -148,14 +151,24 @@ nfs3_lookup(struct req *r)
 	return PROC_OK;
 	}
 
-	ex = fh_lookup_export(&nfh);
-	snprintf(fullpath, sizeof(fullpath), "%s/%s", ex->path, name);
+	/* Resolve directory path from file handle */
+	dfd = fhopen(&fh, O_RDONLY);
+	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
+	(void)close(dfd);
+	xdr_put_u32(&r->out, NFSERR_IO);
+	enc_postop_attr(&r->out, &nfh);
+	return PROC_OK;
+	}
+	(void)close(dfd);
+	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
+
 	if (lgetfh(fullpath, &fh_child) < 0) {
 	xdr_put_u32(&r->out, NFSERR_NOENT);
 	enc_postop_attr(&r->out, &nfh);
 	return PROC_OK;
 	}
 	fh_encode(&child_nfh, &fh_child);
+	fh_path_cache_add(&child_nfh, fullpath);
 
 	xdr_put_u32(&r->out, NFS_OK);
 	enc_fh3(&r->out, &child_nfh);
@@ -216,6 +229,8 @@ nfs3_readlink(struct req *r)
 	struct fs_fattr attr;
 	char link[1024];
 	ssize_t n;
+	const char *cpath;
+	struct stat sb;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
@@ -227,16 +242,37 @@ nfs3_readlink(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
+
+	/* Use path cache to detect symlinks */
+	cpath = fh_path_cache_get(&nfh);
+	if (cpath != NULL && lstat(cpath, &sb) == 0) {
+	if (!S_ISLNK(sb.st_mode)) {
+	xdr_put_u32(&r->out, NFSERR_INVAL);
+	enc_postop_attr(&r->out, &nfh);
+	xdr_put_u32(&r->out, 0);
+	return PROC_OK;
+	}
+	n = readlink(cpath, link, sizeof(link) - 1);
+	if (n < 0) {
+	xdr_put_u32(&r->out, NFSERR_IO);
+	enc_postop_attr(&r->out, &nfh);
+	xdr_put_u32(&r->out, 0);
+	return PROC_OK;
+	}
+	} else {
 	if (!S_ISLNK(attr.mode)) {
 	xdr_put_u32(&r->out, NFSERR_INVAL);
 	enc_postop_attr(&r->out, &nfh);
-	xdr_put_u32(&r->out, 0);  /* data length = 0 */
+	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
 	n = fs_readlink(&fh, link, sizeof(link));
 	if (n < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
+	enc_postop_attr(&r->out, &nfh);
+	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
+	}
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
@@ -296,27 +332,32 @@ nfs3_read(struct req *r)
 
 	/* reply: status + postop_attr + count + data_len + data + eof */
 	xdr_put_u32(&r->out, NFS_OK);
+	log_msg(L_DEBUG, "nfs3_read: about to enc_postop_attr");
 	enc_postop_attr(&r->out, &nfh);
+	log_msg(L_DEBUG, "nfs3_read: after enc_postop_attr pos=%zu", xdr_pos(&r->out));
 	xdr_put_u32(&r->out, 0);  /* count, patch later */
 	mark = xdr_pos(&r->out);
 	xdr_put_u32(&r->out, 0);  /* data_len, patch later */
-	n = read(fd, r->out.base + xdr_pos(&r->out), count);
+	/* Read one extra byte to check for EOF */
+	n = read(fd, r->out.base + xdr_pos(&r->out), count + 1);
 	if (n < 0)
 	n = 0;
 	(void)close(fd);
+	/* Determine EOF before truncating */
+	int is_eof = (n <= (int)count);
+	if ((size_t)n > count)
+	n = count;
 
 	/* Patch count and data_len */
-	{ size_t pos = xdr_pos(&r->out);
+	{
 	size_t datalen = (size_t)n;
-	/* count */
 	xdr_patch_u32(&r->out, mark - 4, (uint32_t)datalen);
-	/* data_len */
 	xdr_patch_u32(&r->out, mark, (uint32_t)datalen);
-	/* advance past data */
 	r->out.pos += datalen;
 	}
 	/* eof */
-	xdr_put_u32(&r->out, (n < (int)count) ? 1 : 0);
+	xdr_put_u32(&r->out, is_eof ? 1 : 0);
+	log_msg(L_DEBUG, "nfs3_read: done n=%d count=%u pos=%zu eof=%d", (int)n, (unsigned)count, xdr_pos(&r->out), is_eof);
 	return PROC_OK;
 }
 
@@ -396,29 +437,32 @@ nfs3_readdir(struct req *r)
 
 	{
 	size_t namelen = strlen(name);
-	size_t entry_size = 8 + 4 + XDR_PAD(namelen) + 8 + 4 + 4;
-	if (xdr_pos(&r->out) + entry_size > count + 24)
+	/* FreeBSD 8 client expects: nextentry(4) + fileid_high(4) + fileid_low(4) + namelen(4) + name(padded) + cookie_high(4) + cookie_low(4) */
+	size_t entry_size = 4 + 4 + 4 + 4 + XDR_PAD(namelen) + 4 + 4;
+	if (xdr_pos(&r->out) + entry_size > count + 24) {
 	done = 1;
-	else {
-	xdr_put_u64(&r->out, inode);             /* fileid */
-	xdr_put_string(&r->out, name);            /* name */
-	xdr_put_u64(&r->out, cur);                /* cookie */
-	xdr_put_u32(&r->out, 0);                  /* name_attributes: attr_follows=0 */
-	xdr_put_u32(&r->out, done ? 0 : 1);       /* nextentry */
+	break;
 	}
+	/* nextentry = true */
+	xdr_put_u32(&r->out, 1);
+	/* fileid as 64-bit (high=0, low=inode) */
+	xdr_put_u32(&r->out, 0);
+	xdr_put_u32(&r->out, (uint32_t)inode);
+	/* name */
+	xdr_put_string(&r->out, name);
+	/* cookie as 64-bit (high=0, low=cur) */
+	xdr_put_u32(&r->out, 0);
+	xdr_put_u32(&r->out, (uint32_t)cur);
 	}
 	cur++;
 	}
 	}
 
-	/* NULL pointer to terminate entry list */
+	/* nextentry = false */
 	xdr_put_u32(&r->out, 0);
 
 	/* eof */
-	if (done)
-	xdr_put_u32(&r->out, 1);
-	else
-	xdr_put_u32(&r->out, 0);
+	xdr_put_u32(&r->out, done ? 1 : 0);
 
 	(void)closedir(dirp);
 	return PROC_OK;

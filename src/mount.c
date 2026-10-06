@@ -172,6 +172,8 @@ mnt3_mnt(struct req *r)
 	/* MNT3_OK */
 	xdr_put_u32(&r->out, MNT3_OK);
 	fh_encode(&nfh, &fh);
+	/* Cache path for READLINK */
+	fh_path_cache_add(&nfh, path);
 	/* fhandle3: var-length opaque, max 64 */
 	xdr_put_u32(&r->out, NFS_FH_SIZE);
 	xdr_put_fixed(&r->out, &nfh, NFS_FH_SIZE);

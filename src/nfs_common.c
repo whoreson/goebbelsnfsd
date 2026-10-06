@@ -89,34 +89,37 @@ nfs2_enc_fattr(struct xdr *x, const struct fs_fattr *attr)
 void
 nfs3_enc_fattr(struct xdr *x, const struct fs_fattr *attr)
 {
-	/* mode */
+	/* fa_type (4 bytes) */
+	xdr_put_u32(x, nfs_mode_to_type(attr->mode));
+	/* fa_mode (4 bytes) */
 	xdr_put_u32(x, attr->mode);
-	/* nlink */
-	xdr_put_u64(x, attr->nlink);
-	/* uid */
+	/* fa_nlink (4 bytes, NOT u64) */
+	xdr_put_u32(x, (uint32_t)attr->nlink);
+	/* fa_uid (4 bytes) */
 	xdr_put_u32(x, attr->uid);
-	/* gid */
+	/* fa_gid (4 bytes) */
 	xdr_put_u32(x, attr->gid);
-	/* size */
+	/* fa_size (8 bytes) */
 	xdr_put_u64(x, attr->size);
-	/* used */
+	/* fa_used (8 bytes) */
 	xdr_put_u64(x, attr->used);
-	/* rspec */
+	/* fa_rdev (8 bytes: specdata1 + specdata2) */
 	xdr_put_u32(x, attr->rdev_spec[0]);
 	xdr_put_u32(x, attr->rdev_spec[1]);
-	/* fsid */
-	xdr_put_u64(x, attr->fileid);	/* simplified */
-	/* fileid */
+	/* fa_fsid (8 bytes) */
 	xdr_put_u64(x, attr->fileid);
-	/* atime */
-	xdr_put_u64(x, (uint64_t)attr->atime_sec);
+	/* fa_fileid (8 bytes) */
+	xdr_put_u64(x, attr->fileid);
+	/* fa_atime (8 bytes: seconds + nseconds, both uint32) */
+	xdr_put_u32(x, (uint32_t)attr->atime_sec);
 	xdr_put_u32(x, (uint32_t)attr->atime_usec * 1000);
-	/* mtime */
-	xdr_put_u64(x, (uint64_t)attr->mtime_sec);
+	/* fa_mtime (8 bytes) */
+	xdr_put_u32(x, (uint32_t)attr->mtime_sec);
 	xdr_put_u32(x, (uint32_t)attr->mtime_usec * 1000);
-	/* ctime */
-	xdr_put_u64(x, (uint64_t)attr->ctime_sec);
+	/* fa_ctime (8 bytes) */
+	xdr_put_u32(x, (uint32_t)attr->ctime_sec);
 	xdr_put_u32(x, (uint32_t)attr->ctime_usec * 1000);
+	/* Total: 4*5 + 8*8 = 84 bytes = NFSX_V3FATTR */
 }
 
 void

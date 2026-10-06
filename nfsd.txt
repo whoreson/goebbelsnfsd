@@ -1,0 +1,76 @@
+# UNFSD Project Plan - Updated Summary (Oct 6, 2025)
+
+## Current Status
+
+### Working (NFSv2):
+- **MOUNT v1/v3**: Both work. `showmount -e` and `showmount` work correctly.
+- **NFSv2 NULL**: Works.
+- **NFSv2 GETATTR**: Works.
+- **NFSv2 STATFS**: Works.
+- **NFSv2 READDIR**: Works for root and subdirectories. Includes `.` and `..` entries.
+- **NFSv2 LOOKUP**: Works for root, subdirectories, `.`, `..`, symlinks, regular files, directories.
+- **NFSv2 READ**: Works. Returns correct data for files.
+- **NFSv2 READLINK**: Works for symlinks (both relative and absolute). Returns NFSERR_NXIO for non-symlinks.
+- **Portmapper registration**: All 8 services registered (NFSv2/v3, MOUNTv1/v3 on UDP/TCP).
+- **Signal handling**: SIGHUP reloads exports, SIGTERM cleanly shuts down and unregisters from portmapper.
+
+### Broken/Incomplete:
+- **NFSv3**: All procedures implemented but NOT TESTED. Known issue with READLINK on non-symlinks (client retries indefinitely).
+- **Write operations**: All write procedures return NFSERR_PERM/ROFS (read-only server).
+- **Credential handling**: No ID mapping or mode-bit checking. All operations run as root with full permissions.
+
+### Key Bugs Fixed This Session:
+
+1. **NFSv2 READ Reply Format (fattr order)**:
+   - Our server sent: `nfsstat + count + data_len + data + fattr`
+   - Correct format: `nfsstat + fattr(68) + count(4) + data(padded to 4-byte boundary, NO length prefix)`
+   - The fattr must come BEFORE the data, and the data has no length prefix (unlike XDR opaque).
+
+2. **NFSv2 READ Data Padding**:
+   - Data must be padded to 4-byte boundary after the count field.
+   - Used `xdr_put_fixed` + explicit padding instead of `xdr_put_var`.
+
+3. **NFSv3 READ missing eof field**:
+   - Added `eof` boolean after the data in NFSv3 READ reply.
+
+4. **NFSv2 LOOKUP for `.` and `..`**:
+   - Previously rejected with NFSERR_NOENT.
+   - Now handled specially: `.` returns the same file handle, `..` returns the parent directory.
+
+5. **Symlink Detection (fhstat follows symlinks)**:
+   - FreeBSD 8's `fhstat` follows symlinks, so `S_ISLNK` always returns false for symlinks.
+   - Fixed by implementing a path cache: LOOKUP stores the path alongside the file handle.
+   - READLINK uses the cached path with `lstat` to detect symlinks and `readlink` to read targets.
+   - LOOKUP uses `lstat(fullpath)` instead of `fs_getattr` for correct symlink attributes.
+
+6. **NFSv2 READLINK error code**:
+   - Changed from NFSERR_INVAL (29) to NFSERR_NXIO (6) for non-symlinks.
+   - Matches the kernel NFS server behavior.
+
+### File Structure:
+- `src/main.c` - Entry point, signal handling, option parsing
+- `src/rpc.c` - RPC header parsing, credential parsing, dispatch
+- `src/xdr.c` - XDR encoding/decoding utilities
+- `src/net.c` - UDP/TCP socket handling, event loop, TCP record marking
+- `src/portmap.c` - Portmapper client (register/unregister)
+- `src/nfs2.c` - NFSv2 procedure handlers
+- `src/nfs3.c` - NFSv3 procedure handlers (untested)
+- `src/mount.c` - MOUNT v1/v3 procedure handlers
+- `src/conf.c` - Exports file parser
+- `src/fh.c` - File handle encoding/decoding + path cache for symlinks
+- `src/fs.c` - Filesystem operations (getattr, access, readdir, etc.)
+- `src/nfs_common.c` - Shared NFS utilities (fattr encoding, error mapping)
+
+### Testing Setup:
+- Server: FreeBSD 8.4 at 10.0.0.186 (localhost)
+- Client: FreeBSD 8.4 at 10.0.0.198
+- Export: `/mnt/1` (UFS filesystem) with `-alldirs` flag
+- Exports file: `/tmp/unfsd.exports`
+- Log file: `/tmp/unfsd.log`
+
+### Next Steps:
+1. **Test NFSv3**: Now that NFSv2 is stable, test NFSv3 mounts and read-only operations.
+2. **Implement cred.c**: ID mapping and mode-bit checking for proper UNIX permissions.
+3. **Refine fs.c**: Handle permissions and edge cases for NFSv2 and NFSv3.
+4. **Implement READDIRPLUS**: For NFSv3 optimization.
+5. **Implement write operations**: CREATE, WRITE, REMOVE, RENAME, etc.
