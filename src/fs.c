@@ -20,6 +20,8 @@ fs_getattr(const fhandle_t *fh, struct fs_fattr *attr)
 	if (fhstat(fh, &sb) < 0)
 	return errno;
 	memset(attr, 0, sizeof(*attr));
+	attr->fsid = (((uint64_t)fh->fh_fsid.val[0]) << 32) |
+	    (uint64_t)(uint32_t)fh->fh_fsid.val[1];
 	attr->mode = sb.st_mode;
 	attr->nlink = sb.st_nlink;
 	attr->uid = sb.st_uid;

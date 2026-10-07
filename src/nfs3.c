@@ -46,8 +46,10 @@ enc_postop_fh3(struct xdr *x, struct nfs_fh *nfh)
 static int
 dec_fh3(struct xdr *x, struct nfs_fh *nfh)
 {
-	size_t n = xdr_get_var(x, nfh, NFS_FH_SIZE);
-	if (n != NFS_FH_SIZE || !xdr_ok(x))
+	/* NFSv3 fhandle3 is opaque <64>. Linux 2.4 sends 64-byte fh.
+	 * We only use the first 32 bytes (our wire format). */
+	size_t n = xdr_get_var(x, nfh, 64);
+	if (n < NFS_FH_SIZE || !xdr_ok(x))
 	return -1;
 	return 0;
 }
@@ -124,9 +126,7 @@ nfs3_setattr(struct req *r)
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
-	log_msg(L_DEBUG, "nfs3_setattr: fh3 decoded, pos=%zu len=%zu", r->in.pos, r->in.len);
 	ex = fh_lookup_export(&nfh);
-	log_msg(L_DEBUG, "nfs3_setattr: ex=%p ro=%d", (void*)ex, ex ? ex->ro : -1);
 	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
@@ -143,10 +143,10 @@ nfs3_setattr(struct req *r)
 	size_set = xdr_get_u32(&r->in); if (size_set) new_size = xdr_get_u64(&r->in);
 	atime_set = xdr_get_u32(&r->in);
 	if (atime_set == 2) { atime_s = xdr_get_u32(&r->in); atime_ns = xdr_get_u32(&r->in); }
-	else if (atime_set == 1) (void)xdr_get_u32(&r->in);  /* TOSERVER: skip 1 extra u32 */
+	/* atime_set == 1 (TOSERVER): no extra data follows */
 	mtime_set = xdr_get_u32(&r->in);
 	if (mtime_set == 2) { mtime_s = xdr_get_u32(&r->in); mtime_ns = xdr_get_u32(&r->in); }
-	else if (mtime_set == 1) (void)xdr_get_u32(&r->in);  /* TOSERVER: skip 1 extra u32 */
+	/* mtime_set == 1 (TOSERVER): no extra data follows */
 
 	/* Decode sattrguard3 - FreeBSD 8 client sends only obj_size discriminant */
 	guard_size_set = xdr_get_u32(&r->in); if (guard_size_set) guard_size = xdr_get_u64(&r->in);
