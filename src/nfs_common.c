@@ -40,6 +40,8 @@ nfs_errno(uint32_t e)
 	case EISDIR:	 return NFSERR_ISDIR;
 	case EINVAL:	 return NFSERR_INVAL;
 	case ENAMETOOLONG: return NFSERR_NAMETOOLONG;
+	case ENOTEMPTY: return NFSERR_NOTEMPTY;
+	case EDQUOT: return NFSERR_DQUOT;
 	default:	 return NFSERR_PERM;
 	}
 }

@@ -677,16 +677,17 @@ nfs3_fsinfo(struct req *r)
 
 	xdr_put_u32(&r->out, NFS_OK);
 	enc_postop_attr(&r->out, &nfh);
-	xdr_put_u32(&r->out, NFS3_MAXDATA);
-	xdr_put_u32(&r->out, NFS3_MAXDATA);
-	xdr_put_u32(&r->out, NFS3_MAXDATA);
-	xdr_put_u32(&r->out, NFS3_MAXDATA);
-	xdr_put_u32(&r->out, NFS3_MAXDATA);
-	xdr_put_u32(&r->out, NFS3_MAXDATA);
-	xdr_put_u32(&r->out, NFS3_MAXDATA);
-	xdr_put_u64(&r->out, 1ULL << 32);
-	xdr_put_u32(&r->out, 1);
-	xdr_put_u32(&r->out, 0);
+	xdr_put_u32(&r->out, NFS3_MAXDATA);  /* rtmax */
+	xdr_put_u32(&r->out, NFS3_MAXDATA);  /* rtpref */
+	xdr_put_u32(&r->out, NFS3_MAXDATA);  /* rtmult */
+	xdr_put_u32(&r->out, NFS3_MAXDATA);  /* wtmax */
+	xdr_put_u32(&r->out, NFS3_MAXDATA);  /* wtpref */
+	xdr_put_u32(&r->out, NFS3_MAXDATA);  /* wtmult */
+	xdr_put_u32(&r->out, NFS3_MAXDATA);  /* dtpref */
+	xdr_put_u64(&r->out, 1ULL << 32);    /* maxfilesize */
+	xdr_put_u32(&r->out, 1);             /* time_delta seconds */
+	xdr_put_u32(&r->out, 0);             /* time_delta nseconds */
+	xdr_put_u32(&r->out, 0);             /* properties */
 	return PROC_OK;
 }
 

@@ -26,6 +26,8 @@ extern const uint8_t nfs_pad;
 #define NFSERR_STALE	70
 #define NFSERR_ROFS	30
 #define NFSERR_GARBAGE	31
+#define NFSERR_NOTEMPTY	38
+#define NFSERR_DQUOT	29
 #define NFSERR_NOTSUPP	10004
 
 /* NFSv2 file types */
