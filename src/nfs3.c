@@ -1103,6 +1103,9 @@ nfs3_create(struct req *r)
 	nfs3_decode_sattr3_mode_uid_gid(&r->in, &new_mode, &new_uid, &new_gid, &uid_set, &gid_set);
 	if (!xdr_ok(&r->in))
 	return PROC_GARBAGE;
+	/* Ensure mode is never 0 (Linux 2.4 mount creates files with mode 0) */
+	if ((new_mode & 07777) == 0)
+	new_mode |= 0600;
 
 	if (nfs3_resolve_dirpath(&dir_nfh, dirpath, sizeof(dirpath)) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
@@ -1191,14 +1194,15 @@ nfs3_mkdir(struct req *r)
 	nfs3_decode_sattr3_mode_uid_gid(&r->in, &new_mode, &new_uid, &new_gid, &uid_set, &gid_set);
 	if (!xdr_ok(&r->in))
 	return PROC_GARBAGE;
+	/* Ensure mode is never 0 */
+	if ((new_mode & 07777) == 0)
+	new_mode |= 0700;
 
 	if (nfs3_resolve_dirpath(&dir_nfh, dirpath, sizeof(dirpath)) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
 	}
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
-	log_msg(L_DEBUG, "nfs3_mkdir: path=%s", fullpath);
-
 	if (mkdir(fullpath, new_mode) < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
 	return PROC_OK;
@@ -1372,6 +1376,9 @@ nfs3_mknod(struct req *r)
 	    &uid_set, &gid_set);
 	if (!xdr_ok(&r->in))
 	return PROC_GARBAGE;
+	/* Ensure mode is never 0 */
+	if ((new_mode & 07777) == 0)
+	new_mode |= 0600;
 
 	if (nfs3_resolve_dirpath(&dir_nfh, dirpath, sizeof(dirpath)) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
