@@ -506,7 +506,7 @@ nfs2_write(struct req *r)
 {
 	struct nfs_fh nfh;
 	fhandle_t fh;
-	uint32_t offset, count, stable;
+	uint32_t offset, count;
 	int fd;
 	ssize_t n;
 	const char *cpath;
@@ -579,8 +579,7 @@ nfs2_write(struct req *r)
 	log_msg(L_DEBUG, "WRITE: writing %d bytes at offset %d to %s", (int)count, (int)offset, cpath);
 	n = write(fd, wbuf, count);
 	log_msg(L_DEBUG, "WRITE: wrote %d errno=%d", (int)n, errno);
-	if (n >= 0)
-	(void)fsync(fd);
+	/* NFSv2 has no stable_how concept - never fsync */
 	(void)close(fd);
 	if (n < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));

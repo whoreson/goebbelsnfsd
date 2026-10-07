@@ -67,4 +67,7 @@ void nfs3_enc_fsstat(struct xdr *x, const struct statfs *sf);
 /* Encode pre_op_attr (wcc_attr: size + mtime + ctime) */
 void nfs3_enc_pre_op_attr(struct xdr *x, const struct fs_fattr *attr);
 
+/* Encode post_op_attr from a pre-computed fattr (avoids redundant fhstat) */
+void enc_postop_attr_fattr(struct xdr *x, const struct fs_fattr *attr);
+
 #endif

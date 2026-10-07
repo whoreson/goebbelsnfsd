@@ -177,3 +177,15 @@ nfs3_enc_pre_op_attr(struct xdr *x, const struct fs_fattr *attr)
 	xdr_put_u32(x, (uint32_t)attr->ctime_sec);
 	xdr_put_u32(x, (uint32_t)attr->ctime_usec * 1000);
 }
+
+/* Encode post_op_attr from a pre-computed fattr (avoids redundant fhstat) */
+void
+enc_postop_attr_fattr(struct xdr *x, const struct fs_fattr *attr)
+{
+	if (attr == NULL) {
+	xdr_put_u32(x, 0);
+	return;
+	}
+	xdr_put_u32(x, 1);
+	nfs3_enc_fattr(x, attr);
+}

@@ -55,18 +55,6 @@ dec_fh3(struct xdr *x, struct nfs_fh *nfh)
 /*
  * post_op_attr: attr_follows(1) + fattr(if true)
  */
-/* Encode post_op_attr from a pre-computed fattr (avoid re-stat) */
-static void
-enc_postop_attr_fattr(struct xdr *x, const struct fs_fattr *attr)
-{
-	if (attr == NULL) {
-	xdr_put_u32(x, 0);
-	return;
-	}
-	xdr_put_u32(x, 1);
-	nfs3_enc_fattr(x, attr);
-}
-
 /* Encode post_op_attr by decoding fh and getting attributes */
 static void
 enc_postop_attr(struct xdr *x, const struct nfs_fh *nfh)
@@ -78,7 +66,7 @@ enc_postop_attr(struct xdr *x, const struct nfs_fh *nfh)
 	fhandle_t fh;
 	struct fs_fattr attr;
 	int ok = fh_decode(nfh, &fh) >= 0 && fs_getattr(&fh, &attr) == NFS_OK;
-	log_msg(L_DEBUG, "enc_postop_attr: ok=%d", ok);
+	(void)ok;
 	if (ok) {
 	xdr_put_u32(x, 1);
 	nfs3_enc_fattr(x, &attr);
@@ -493,7 +481,7 @@ nfs3_read(struct req *r)
 
 	/* reply: status + postop_attr + count + eof + data_len + data */
 	xdr_put_u32(&r->out, NFS_OK);
-	enc_postop_attr(&r->out, &nfh);
+	enc_postop_attr_fattr(&r->out, &attr);
 	{
 	size_t count_mark = xdr_pos(&r->out);
 	xdr_put_u32(&r->out, 0);  /* count, patch later */
@@ -564,7 +552,7 @@ nfs3_readdir(struct req *r)
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
-	enc_postop_attr(&r->out, &nfh);
+	enc_postop_attr_fattr(&r->out, &attr);
 	xdr_put_u32(&r->out, 0);  /* cookieverf */
 	xdr_put_u32(&r->out, 0);
 
@@ -682,7 +670,7 @@ nfs3_readdirplus(struct req *r)
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
-	enc_postop_attr(&r->out, &nfh);
+	enc_postop_attr_fattr(&r->out, &attr);
 	xdr_put_u32(&r->out, 0);  /* cookieverf */
 	xdr_put_u32(&r->out, 0);
 
@@ -1003,11 +991,9 @@ nfs3_write(struct req *r)
 	return PROC_OK;
 	}
 
-	/* stable_how: FILESYNC(2) => fsync, DATASYNC(1) => fdatasync, UNSTABLE(0) => no sync */
-	if (stable_how >= NFS3_MAXDATA) {
-	/* treat FILESYNC and above as fsync */
+	/* stable_how: UNSTABLE(0)=no sync, DATASYNC(1)=fsync, FILESYNC(2)=fsync */
+	if (stable_how >= 1)
 	(void)fsync(fd);
-	}
 	(void)close(fd);
 
 	if (fs_getattr(&fh, &post_attr) != NFS_OK) {
