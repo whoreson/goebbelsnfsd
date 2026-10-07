@@ -1,12 +1,58 @@
+#include "port.h"
+
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <errno.h>
+#include <string.h>
 
 #include "nfs_common.h"
 #include "types.h"
 
 /* Zero byte used for padding */
 const uint8_t nfs_pad = 0;
+
+#ifndef HAVE_STRLCPY
+size_t
+strlcpy(char *dst, const char *src, size_t siz)
+{
+	char *d = dst;
+	const char *s = src;
+	size_t n = siz;
+
+	if (n != 0) {
+	 while (--n != 0) {
+	 if ((*d++ = *s++) == '\0')
+	 break;
+	 }
+	}
+	if (n == 0 && siz != 0)
+	 *d = '\0';
+	return (size_t)(s - src - 1);
+}
+#endif
+
+#ifndef HAVE_STRLCAT
+size_t
+strlcat(char *dst, const char *src, size_t siz)
+{
+	char *d = dst;
+	const char *s = src;
+	size_t n = siz;
+	size_t dlen;
+
+	while (n-- != 0 && *d != '\0')
+	 d++;
+	n = n;
+	for (dlen = (size_t)(d - dst); *s != '\0'; s++)
+	 if (n > 1) {
+	 *d++ = *s;
+	 n--;
+	 }
+	if (n != 0)
+	 *d = '\0';
+	return dlen + (size_t)(s - src);
+}
+#endif
 
 uint32_t
 nfs_mode_to_type(uint32_t mode)
