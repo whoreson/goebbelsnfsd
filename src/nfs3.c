@@ -29,6 +29,8 @@ uint32_t nfs3_wverf[2];
 static int nfs3_null(struct req *r) { (void)r; return PROC_OK; }
 static int __attribute__((unused)) nfs3_notimpl(struct req *r) { (void)r; return PROC_UNAVAIL; }
 
+static int nfs3_resolve_dirpath(const struct nfs_fh *nfh, char *dirpath, size_t dirpathsz);
+
 /* NFSv3 file handle: opaque <NFSX_V3FHMAX> (len prefix + data) */
 static void
 enc_fh3(struct xdr *x, struct nfs_fh *nfh)
@@ -249,7 +251,6 @@ nfs3_lookup(struct req *r)
 	char name[256];
 	char dirpath[512];
 	char fullpath[512];
-	int dfd;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
@@ -270,14 +271,11 @@ nfs3_lookup(struct req *r)
 	}
 
 	/* Resolve directory path from file handle */
-	dfd = PORT_FHOPEN(&fh, O_RDONLY);
-	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
-	(void)close(dfd);
+	if (nfs3_resolve_dirpath(&nfh, dirpath, sizeof(dirpath)) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	enc_postop_attr(&r->out, &nfh);
 	return PROC_OK;
 	}
-	(void)close(dfd);
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 
 	if (port_lgetfh(fullpath, &fh_child) < 0) {
@@ -893,12 +891,32 @@ nfs3_resolve_dirpath(const struct nfs_fh *nfh, char *dirpath, size_t dirpathsz)
 	if (fh_decode(nfh, &fh) < 0)
 	return -1;
 	dfd = PORT_FHOPEN(&fh, O_RDONLY);
-	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, dirpathsz) == NULL) {
+	if (dfd >= 0) {
+	if (fchdir(dfd) < 0 || getcwd(dirpath, dirpathsz) == NULL) {
 	(void)close(dfd);
 	return -1;
 	}
 	(void)close(dfd);
 	return 0;
+	}
+	/* Linux fallback: use path cache */
+	{
+	const char *cpath = fh_path_cache_get(nfh);
+	if (cpath != NULL && strlen(cpath) + 1 < dirpathsz) {
+	(void)strlcpy(dirpath, cpath, dirpathsz);
+	return 0;
+	}
+	}
+#ifndef __FreeBSD__
+	{
+	const char *cpath = fh_path_cache_getbyfh(&fh);
+	if (cpath != NULL && strlen(cpath) + 1 < dirpathsz) {
+	(void)strlcpy(dirpath, cpath, dirpathsz);
+	return 0;
+	}
+	}
+#endif
+	return -1;
 }
 
 /* Helper: encode wcc_data using pre-computed fs_fattr for both pre and post */

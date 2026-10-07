@@ -36,4 +36,8 @@ const struct export *fh_lookup_export(const struct nfs_fh *nfh);
 void fh_path_cache_add(const struct nfs_fh *nfh, const char *path);
 const char *fh_path_cache_get(const struct nfs_fh *nfh);
 
+#ifndef __FreeBSD__
+const char *fh_path_cache_getbyfh(const fhandle_t *fh);
+#endif
+
 #endif

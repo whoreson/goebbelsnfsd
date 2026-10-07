@@ -46,6 +46,26 @@ fh_path_cache_get(const struct nfs_fh *nfh)
 	return NULL;
 }
 
+#ifndef __FreeBSD__
+const char *
+fh_path_cache_getbyfh(const fhandle_t *fh)
+{
+	size_t i;
+	fhandle_t cfh;
+	for (i = 0; i < FH_PATH_CACHE_SIZE; i++) {
+	if (fh_path_cache[i].path[0] == '\0')
+	continue;
+	if (fh_decode(&fh_path_cache[i].key, &cfh) < 0)
+	continue;
+	if (cfh.fh_dev == fh->fh_dev && cfh.fh_ino == fh->fh_ino &&
+	    cfh.fh_fsid[0] == fh->fh_fsid[0] &&
+	    cfh.fh_fsid[1] == fh->fh_fsid[1])
+	return fh_path_cache[i].path;
+	}
+	return NULL;
+}
+#endif
+
 int
 fh_encode(struct nfs_fh *nfh, const fhandle_t *fh)
 {

@@ -219,31 +219,65 @@ fs_lookup(const struct export *ex, const char *path,
 
 #else /* Linux */
 
-/* Linux stubs: all operations are path-based in the NFS handlers.
- * These functions are kept for API compatibility but return ENOSYS. */
+/* Linux: fhandle_t contains dev/fsid/ino. Resolve to path via cache,
+ * then use path-based syscalls. */
 
 int
 fs_getattr(const fhandle_t *fh, struct fs_fattr *attr)
 {
-	(void)fh;
-	(void)attr;
-	return ENOSYS;
+	const char *path;
+	struct stat sb;
+
+	path = fh_path_cache_getbyfh(fh);
+	if (path == NULL)
+	return ENOENT;
+	if (stat(path, &sb) < 0)
+	return errno;
+	memset(attr, 0, sizeof(*attr));
+	attr->fsid = (((uint64_t)fh->fh_fsid[0]) << 32) |
+	    (uint64_t)(uint32_t)fh->fh_fsid[1];
+	attr->mode = sb.st_mode;
+	attr->nlink = sb.st_nlink;
+	attr->uid = sb.st_uid;
+	attr->gid = sb.st_gid;
+	attr->size = sb.st_size;
+	attr->used = sb.st_blocks;
+	attr->fileid = sb.st_ino;
+	if (S_ISCHR(sb.st_mode) || S_ISBLK(sb.st_mode)) {
+	attr->rdev_spec[0] = major(sb.st_rdev);
+	attr->rdev_spec[1] = minor(sb.st_rdev);
+	}
+	attr->atime_sec = sb.st_atim.tv_sec;
+	attr->atime_usec = sb.st_atim.tv_nsec / 1000;
+	attr->mtime_sec = sb.st_mtim.tv_sec;
+	attr->mtime_usec = sb.st_mtim.tv_nsec / 1000;
+	attr->ctime_sec = sb.st_ctim.tv_sec;
+	attr->ctime_usec = sb.st_ctim.tv_nsec / 1000;
+	return 0;
 }
 
 int
 fs_statfs(const fhandle_t *fh, struct statfs *sf)
 {
-	(void)fh;
-	(void)sf;
-	return ENOSYS;
+	const char *path;
+
+	path = fh_path_cache_getbyfh(fh);
+	if (path == NULL)
+	return ENOENT;
+	if (statfs(path, sf) < 0)
+	return errno;
+	return 0;
 }
 
 int
 fs_open(const fhandle_t *fh, int flags)
 {
-	(void)fh;
-	(void)flags;
-	return -1;
+	const char *path;
+
+	path = fh_path_cache_getbyfh(fh);
+	if (path == NULL)
+	return -ENOENT;
+	return open(path, flags);
 }
 
 ssize_t
@@ -264,18 +298,27 @@ fs_read(int fd, void *buf, size_t len, off_t offset)
 ssize_t
 fs_readlink(const fhandle_t *fh, char *buf, size_t buflen)
 {
-	(void)fh;
-	(void)buf;
-	(void)buflen;
-	return -ENOSYS;
+	const char *path;
+
+	path = fh_path_cache_getbyfh(fh);
+	if (path == NULL)
+	return -ENOENT;
+	return readlink(path, buf, buflen);
 }
 
 int
 fs_opendir(const fhandle_t *fh, DIR **dirp)
 {
-	(void)fh;
-	(void)dirp;
-	return ENOSYS;
+	const char *path;
+
+	path = fh_path_cache_getbyfh(fh);
+	if (path == NULL)
+	return ENOENT;
+	DIR *d = opendir(path);
+	if (d == NULL)
+	return errno;
+	*dirp = d;
+	return 0;
 }
 
 int
