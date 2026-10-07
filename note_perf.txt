@@ -1,0 +1,42 @@
+NFS Server Performance Optimization Notes
+==========================================
+
+PROBLEM: ~60MiB/s throughput, CPU-bound on single core.
+
+HOT PATH (NFSv3 READ):
+1. TCP recv -> XDR decode -> fh_lookup_export() -> fh_decode() -> fhstat() -> fhopen() -> lseek() -> read() -> close()
+2. enc_postop_attr() -> fh_decode() -> fhstat() AGAIN
+3. XDR encode -> TCP send
+
+BOTTLENECKS:
+1. CRITICAL: fhstat called TWICE per READ (once in handler, once in enc_postop_attr)
+2. CRITICAL: fh_lookup_export fallback: fhopen + fchdir + getcwd per request
+3. HIGH: open/close per operation (no fd caching)
+4. HIGH: malloc/free per READ
+5. HIGH: log_msg with time()+localtime()+snprintf+write per request
+6. MEDIUM: Linear program lookup
+7. MEDIUM: Byte-by-byte XDR endianness conversion
+8. MEDIUM: Linear export search
+
+OPTIMIZATIONS (in order of impact):
+
+1. [DONE] Attribute caching: Pass pre-computed fs_fattr to enc_postop_attr
+   - Eliminates one fhstat syscall per READ
+   - Added enc_postop_attr_fattr() in nfs_common.c
+
+2. [DONE] fd caching: LRU cache of open file descriptors
+   - Eliminates fhopen + close syscalls for sequential reads
+   - Cache size: 64 entries, key = nfs_fh
+
+3. [TODO] Path cache improvements: Always cache resolved paths
+
+4. [TODO] XDR optimization: Use bswap32/htonl, batch writes
+
+5. [TODO] Program lookup: Fixed array instead of linear search
+
+6. [TODO] Stack buffer for small reads (<4096 bytes)
+
+7. [TODO] Conditional DEBUG logging
+
+EXPECTED: 2-3x throughput improvement conservative, 4-5x optimistic.
+

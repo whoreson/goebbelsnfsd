@@ -1,0 +1,133 @@
+NFS Server Performance Analysis & Optimization Plan
+====================================================
+
+Current architecture:
+- Single-threaded event loop (poll-based)
+- One request processed at a time per TCP connection
+- No fd caching (open/close per operation)
+- No reply caching
+- No batching
+
+Hot path analysis for a READ (NFSv3):
+1. TCP recv (record marking parse) - net.c
+2. XDR decode header - rpc.c (program lookup via linear search)
+3. XDR decode file handle - nfs3.c (dec_fh3)
+4. fh_lookup_export() - fh.c (linear search + fh_decode + path cache + fhopen/fchdir/getcwd)
+5. fh_decode() - fh.c (manual big-endian decode)
+6. fs_getattr() - fs.c (fhstat syscall)
+7. fs_open() - fs.c (fhopen syscall)
+8. lseek() - syscall
+9. malloc(count+1) - heap allocation per READ
+10. read() - syscall
+11. close() - syscall
+12. enc_postop_attr() - nfs3.c (fh_decode + fhstat again!)
+13. nfs3_enc_fattr() - XDR encode 84 bytes
+14. xdr_put_fixed(data) - memcpy
+15. free(tmp)
+16. log_msg() - time() + localtime() + snprintf() + write()
+17. TCP write (record marking)
+
+BOTTLENECKS IDENTIFIED:
+
+1. CRITICAL: enc_postop_attr() calls fh_decode + fhstat on EVERY READ
+   - This duplicates the fhstat already done in step 6
+   - fhstat is a syscall. Two syscalls instead of one.
+
+2. CRITICAL: fh_lookup_export() fallback path does fhopen + fchdir + getcwd
+   - For every READ on a cross-filesystem file, this is 3 syscalls
+   - getcwd allocates memory and does path traversal
+   - The path cache only helps for previously seen file handles
+
+3. HIGH: No fd caching - open/close per operation
+   - fhopen() is a syscall, close() is a syscall
+   - For sequential reads, the same fd could be reused
+
+4. HIGH: malloc/free per READ
+   - Small allocations are fast but add up at high IOPS
+
+5. HIGH: log_msg() on every request (with -vv)
+   - time() + localtime() + snprintf() + write() per request
+   - Even at INFO level, this adds overhead
+
+6. MEDIUM: Linear program lookup in rpc.c
+   - O(n) search through RPC_MAXPROGS (16) programs
+   - Could be replaced with a hash or array indexed by prog number
+
+7. MEDIUM: XDR functions do byte-by-byte big-endian conversion
+   - xdr_get_u32: 4 shifts + 4 ORs + 4 byte loads
+   - xdr_put_u32: 4 shifts + 4 byte stores
+   - Could use bswap32/htonl on x86
+
+8. MEDIUM: fh_lookup_export linear search through all exports
+   - O(n) where n = number of exports
+   - For large export lists, this adds up
+
+9. LOW: Single-threaded event loop
+   - Only one request processed at a time
+   - TCP connections block each other
+
+10. LOW: No read-ahead or buffering
+    - Each READ is a single syscall to the filesystem
+    - Could buffer filesystem reads for sequential access
+
+OPTIMIZATION PRIORITIES:
+
+Priority 1 (Biggest wins, low risk):
+- Cache fhstat result: combine step 4/6 so fhstat is called only once per READ
+- Remove redundant fhstat from enc_postop_attr: pass pre-computed attr instead
+- Skip log_msg at DEBUG level in production builds
+- Use getauxval(AT_RANDOM) for writeverf instead of time()
+
+Priority 2 (Medium wins):
+- fd caching: cache open fds for files, with LRU eviction
+- Path cache improvements: always cache paths from fh_lookup_export fallback
+- Replace malloc with stack allocation for small reads (count < 4096)
+
+Priority 3 (Architectural):
+- Multi-threading: worker threads for request processing
+- Event-driven I/O with kqueue instead of poll
+- Batched file handle validation
+
+IMPLEMENTATION PLAN:
+
+Phase 1: Attribute caching (1-2 hours)
+- Modify nfs3_read to pass pre-computed attr to enc_postop_attr
+- Add enc_postop_attr_fattr() that takes a pre-computed fs_fattr
+- Same optimization for nfs2_read, nfs3_write
+- Expected: ~15-20% improvement (eliminate one syscall per read)
+
+Phase 2: fd caching (2-3 hours)
+- Add fd_cache with LRU eviction (max 64 entries)
+- Key: nfs_fh (32 bytes)
+- Value: fd + last_access_time
+- fd_open_cached() / fd_close_cached()
+- Expected: ~20-30% improvement for sequential reads
+
+Phase 3: Path cache improvements (1 hour)
+- Always cache the resolved path in fh_lookup_export fallback
+- Increase cache size from 64 to 256
+- Expected: ~10% improvement for cross-filesystem operations
+
+Phase 4: XDR optimization (1 hour)
+- Use bswap32/htonl where available
+- Batch u32 writes with memcpy for fattr encoding
+- Expected: ~5-10% improvement
+
+Phase 5: Program lookup optimization (30 min)
+- Use fixed-size array indexed by program number
+- Or use a hash table
+- Expected: ~2-5% improvement
+
+Phase 6: Small allocation optimization (30 min)
+- Stack buffer for reads < 4096 bytes
+- Slab allocator for common sizes
+- Expected: ~5% improvement
+
+Phase 7: Log level optimization (30 min)
+- Conditional compilation of DEBUG logs
+- Expected: ~10% improvement with -v (not -vv)
+
+EXPECTED TOTAL IMPROVEMENT:
+Conservative: 2-3x throughput improvement
+Optimistic: 4-5x throughput improvement
+
