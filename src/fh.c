@@ -1,10 +1,12 @@
 #include <string.h>
 #include <fcntl.h>
+#ifdef __FreeBSD__
 #include <sys/mount.h>
 #include <sys/param.h>
-
+#endif
 #include "fh.h"
 #include "conf.h"
+#include "port.h"
 
 /* Simple LRU path cache for symlinks */
 #define FH_PATH_CACHE_SIZE 64
@@ -57,6 +59,7 @@ fh_encode(struct nfs_fh *nfh, const fhandle_t *fh)
 	p[0] = (v16 >> 8) & 0xFF;
 	p[1] = v16 & 0xFF;
 	p += 2;
+#ifdef __FreeBSD__
 	/* fid_len (2 bytes, big-endian) */
 	v16 = (uint16_t)fh->fh_fid.fid_len;
 	p[0] = (v16 >> 8) & 0xFF;
@@ -69,20 +72,49 @@ fh_encode(struct nfs_fh *nfh, const fhandle_t *fh)
 	p += 2;
 	/* fsid[0] (4 bytes, big-endian) */
 	v32 = fh->fh_fsid.val[0];
+#else
+	/* Linux: synthetic fh - store dev(4) + ino(8) + fsid(8) */
+	v32 = (uint32_t)fh->fh_dev;
+#endif
 	p[0] = (v32 >> 24) & 0xFF;
 	p[1] = (v32 >> 16) & 0xFF;
 	p[2] = (v32 >> 8) & 0xFF;
 	p[3] = v32 & 0xFF;
 	p += 4;
+#ifdef __FreeBSD__
 	/* fsid[1] (4 bytes, big-endian) */
 	v32 = fh->fh_fsid.val[1];
+#else
+	v32 = (uint32_t)(fh->fh_fsid[0] >> 32);
+#endif
 	p[0] = (v32 >> 24) & 0xFF;
 	p[1] = (v32 >> 16) & 0xFF;
 	p[2] = (v32 >> 8) & 0xFF;
 	p[3] = v32 & 0xFF;
 	p += 4;
+#ifdef __FreeBSD__
 	/* fid (20 bytes) */
 	memcpy(p, fh->fh_fid.fid_data, fh->fh_fid.fid_len);
+#else
+	/* Linux: fsid[0] low 32 bits + ino (8 bytes) */
+	v32 = (uint32_t)fh->fh_fsid[0];
+	p[0] = (v32 >> 24) & 0xFF;
+	p[1] = (v32 >> 16) & 0xFF;
+	p[2] = (v32 >> 8) & 0xFF;
+	p[3] = v32 & 0xFF;
+	p += 4;
+	v32 = (uint32_t)(fh->fh_ino >> 32);
+	p[0] = (v32 >> 24) & 0xFF;
+	p[1] = (v32 >> 16) & 0xFF;
+	p[2] = (v32 >> 8) & 0xFF;
+	p[3] = v32 & 0xFF;
+	p += 4;
+	v32 = (uint32_t)fh->fh_ino;
+	p[0] = (v32 >> 24) & 0xFF;
+	p[1] = (v32 >> 16) & 0xFF;
+	p[2] = (v32 >> 8) & 0xFF;
+	p[3] = v32 & 0xFF;
+#endif
 	return 0;
 }
 
@@ -108,6 +140,7 @@ fh_decode(const struct nfs_fh *nfh, fhandle_t *fh)
 	uint32_t v32;
 
 	memset(fh, 0, sizeof(*fh));
+#ifdef __FreeBSD__
 	/* fid_len */
 	fh->fh_fid.fid_len = (u_short)(((uint16_t)nfh->data[2] << 8) | nfh->data[3]);
 	/* fid_data0 */
@@ -125,6 +158,29 @@ fh_decode(const struct nfs_fh *nfh, fhandle_t *fh)
 	p += 4;
 	/* fid_data */
 	memcpy(fh->fh_fid.fid_data, p, fh->fh_fid.fid_len);
+#else
+	/* Linux: dev(4) + fsid_high(4) + fsid_low(4) + ino_high(4) + ino_low(4) */
+	p = nfh->data + 6;
+	v32 = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	    ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+	fh->fh_dev = v32;
+	p += 4;
+	v32 = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	    ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+	fh->fh_fsid[0] = ((uint64_t)v32) << 32;
+	p += 4;
+	v32 = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	    ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+	fh->fh_fsid[0] |= v32;
+	p += 4;
+	v32 = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	    ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+	fh->fh_ino = ((uint64_t)v32) << 32;
+	p += 4;
+	v32 = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	    ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+	fh->fh_ino |= v32;
+#endif
 	return 0;
 }
 
@@ -143,7 +199,7 @@ fh_lookup_export(const struct nfs_fh *nfh)
 
 	for (i = 0; i < conf_export_count(); i++) {
 	ex = conf_get_export(i);
-	if (ex->fsid.val[0] == fsid0 && ex->fsid.val[1] == fsid1)
+	if (ex->fsid_val[0] == fsid0 && ex->fsid_val[1] == fsid1)
 	return ex;
 	}
 
@@ -177,7 +233,7 @@ fh_lookup_export(const struct nfs_fh *nfh)
 	}
 
 	/* Fallback: resolve path via fhopen+fchdir+getcwd */
-	fd = fhopen(&fh, O_RDONLY);
+	fd = PORT_FHOPEN(&fh, O_RDONLY);
 	if (fd < 0)
 	return NULL;
 	if (fchdir(fd) == 0 && getcwd(path, sizeof(path)) != NULL) {

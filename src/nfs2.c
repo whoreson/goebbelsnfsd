@@ -8,6 +8,7 @@
 #include <utime.h>
 
 #include "conf.h"
+#include "port.h"
 #include "fh.h"
 #include "fs.h"
 #include "log.h"
@@ -181,7 +182,7 @@ nfs2_lookup(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	dfd = fhopen(&dir_kfh, O_RDONLY);
+	dfd = PORT_FHOPEN(&dir_kfh, O_RDONLY);
 	if (dfd < 0) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
@@ -216,13 +217,13 @@ xdr_put_u32(&r->out, nstat);
 	} else {
 	char *slash = strrchr(dirpath, '/');
 	if (slash == dirpath) {
-	if (lgetfh("/", &fh) < 0) {
+	if (port_lgetfh("/", &fh) < 0) {
 	xdr_put_u32(&r->out, NFSERR_NOENT);
 	return PROC_OK;
 	}
 	} else {
 	*slash = '\0';
-	if (lgetfh(dirpath, &fh) < 0) {
+	if (port_lgetfh(dirpath, &fh) < 0) {
 	*slash = '/';
 	xdr_put_u32(&r->out, NFSERR_NOENT);
 	return PROC_OK;
@@ -232,7 +233,7 @@ xdr_put_u32(&r->out, nstat);
 	}
 	} else {
 	log_msg(L_DEBUG, "LOOKUP: fullpath=%s", fullpath);
-	if (lgetfh(fullpath, &fh) < 0) {
+	if (port_lgetfh(fullpath, &fh) < 0) {
 	xdr_put_u32(&r->out, NFSERR_NOENT);
 	return PROC_OK;
 	}
@@ -253,12 +254,12 @@ xdr_put_u32(&r->out, nstat);
 	attr.size = sb.st_size;
 	attr.used = sb.st_blocks;
 	attr.fileid = sb.st_ino;
-	attr.atime_sec = sb.st_atimespec.tv_sec;
-	attr.atime_usec = sb.st_atimespec.tv_nsec / 1000;
-	attr.mtime_sec = sb.st_mtimespec.tv_sec;
-	attr.mtime_usec = sb.st_mtimespec.tv_nsec / 1000;
-	attr.ctime_sec = sb.st_ctimespec.tv_sec;
-	attr.ctime_usec = sb.st_ctimespec.tv_nsec / 1000;
+	attr.atime_sec = sb.PORT_ST_ATIM.tv_sec;
+	attr.atime_usec = sb.PORT_ST_ATIM.tv_nsec / 1000;
+	attr.mtime_sec = sb.PORT_ST_MTIM.tv_sec;
+	attr.mtime_usec = sb.PORT_ST_MTIM.tv_nsec / 1000;
+	attr.ctime_sec = sb.PORT_ST_CTIM.tv_sec;
+	attr.ctime_usec = sb.PORT_ST_CTIM.tv_nsec / 1000;
 	}
 
 	/* Encode reply: status, fh, fattr */
@@ -297,7 +298,7 @@ nfs2_readlink(struct req *r)
 	cpath = fh_path_cache_get(&nfh);
 	if (cpath == NULL) {
 	/* Fallback: try fhopen + fchdir + getcwd (works for dirs) */
-	int rfd = fhopen(&fh, O_RDONLY);
+	int rfd = PORT_FHOPEN(&fh, O_RDONLY);
 	if (rfd >= 0 && fchdir(rfd) == 0) {
 	char tmp[1024];
 	if (getcwd(tmp, sizeof(tmp)) != NULL) {
@@ -375,7 +376,7 @@ nfs2_read(struct req *r)
 	return PROC_OK;
 	}
 
-	fd = fhopen(&fh, O_RDONLY);
+	fd = PORT_FHOPEN(&fh, O_RDONLY);
 	if (fd < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
@@ -414,7 +415,7 @@ nfs2_resolve_dirpath(const struct nfs_fh *nfh, fhandle_t *fh, char *dirpath, siz
 {
 	if (fh_decode(nfh, fh) < 0)
 	return -1;
-	int dfd = fhopen(fh, O_RDONLY);
+	int dfd = PORT_FHOPEN(fh, O_RDONLY);
 	if (dfd < 0)
 	return -1;
 	if (fchdir(dfd) < 0 || getcwd(dirpath, sz) == NULL) {
@@ -479,14 +480,14 @@ nfs2_setattr(struct req *r)
 	tv[0].tv_sec = atime_s; tv[0].tv_nsec = atime_u * 1000;
 	} else {
 	if (lstat(cpath, &sb) == 0)
-	memcpy(&tv[0], &sb.st_atimespec, sizeof(tv[0]));
+	memcpy(&tv[0], &sb.PORT_ST_ATIM, sizeof(tv[0]));
 	else { tv[0].tv_sec = 0; tv[0].tv_nsec = 0; }
 	}
 	if (mtime_s != (uint32_t)-1) {
 	tv[1].tv_sec = mtime_s; tv[1].tv_nsec = mtime_u * 1000;
 	} else {
 	if (lstat(cpath, &sb) == 0)
-	memcpy(&tv[1], &sb.st_mtimespec, sizeof(tv[1]));
+	memcpy(&tv[1], &sb.PORT_ST_MTIM, sizeof(tv[1]));
 	else { tv[1].tv_sec = 0; tv[1].tv_nsec = 0; }
 	}
 	{
@@ -539,7 +540,7 @@ nfs2_write(struct req *r)
 	if (cpath == NULL) {
 	log_msg(L_DEBUG, "WRITE: no path cache, trying fhopen");
 	/* Fallback: use fhopen + fchdir + getcwd */
-	int rfd = fhopen(&fh, O_RDONLY);
+	int rfd = PORT_FHOPEN(&fh, O_RDONLY);
 	if (rfd >= 0 && fchdir(rfd) == 0) {
 	char tmp[1024];
 	if (getcwd(tmp, sizeof(tmp))) {
@@ -654,7 +655,7 @@ nfs2_create(struct req *r)
 	(void)chown(fullpath, uid == (uint32_t)-1 ? -1 : uid,
 	    gid == (uint32_t)-1 ? -1 : gid);
 
-	if (lgetfh(fullpath, &fh) < 0) {
+	if (port_lgetfh(fullpath, &fh) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
 	}
@@ -913,7 +914,7 @@ nfs2_mkdir(struct req *r)
 	(void)chown(fullpath, uid == (uint32_t)-1 ? -1 : uid,
 	    gid == (uint32_t)-1 ? -1 : gid);
 
-	if (lgetfh(fullpath, &fh) < 0) {
+	if (port_lgetfh(fullpath, &fh) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
 	}
@@ -1053,7 +1054,7 @@ xdr_put_u32(&r->out, nstat);
 	{
 	int dfd;
 	char dirpath[MAX_PATH_LEN];
-	dfd = fhopen(&fh, O_RDONLY);
+	dfd = PORT_FHOPEN(&fh, O_RDONLY);
 	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
 	(void)close(dfd);
 	xdr_put_u32(&r->out, 0);  /* more=0 */
@@ -1096,7 +1097,7 @@ xdr_put_u32(&r->out, nstat);
 	}
 	/* Skip entries we can't get a handle for */
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
-	if (lgetfh(fullpath, &entry_fh_k) < 0)
+	if (port_lgetfh(fullpath, &entry_fh_k) < 0)
 	continue;
 
 	entries[nent].inode = (uint32_t)inode;

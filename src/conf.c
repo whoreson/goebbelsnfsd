@@ -11,6 +11,7 @@
 
 #include "conf.h"
 #include "log.h"
+#include "port.h"
 
 static struct export *exports;
 static unsigned nexports;
@@ -230,7 +231,7 @@ parse_exports(const char *path)
 	}
 	strcpy(ex->path, lpath);
 
-	if (lgetfh(ex->path, (fhandle_t *)0) < 0) {
+	if (port_lgetfh(ex->path, (fhandle_t *)0) < 0) {
 	/* We need the fsid, not the full handle. Use statfs. */
 	struct statfs sf;
 	if (statfs(ex->path, &sf) < 0) {
@@ -238,7 +239,8 @@ parse_exports(const char *path)
 	    strerror(errno));
 	continue;
 	}
-	ex->fsid = sf.f_fsid;
+	ex->fsid_val[0] = PORT_FSID_VAL0(sf);
+	ex->fsid_val[1] = PORT_FSID_VAL1(sf);
 	} else {
 	/* We already have it from statfs above */
 	struct statfs sf;
@@ -247,14 +249,15 @@ parse_exports(const char *path)
 	    strerror(errno));
 	continue;
 	}
-	ex->fsid = sf.f_fsid;
+	ex->fsid_val[0] = PORT_FSID_VAL0(sf);
+	ex->fsid_val[1] = PORT_FSID_VAL1(sf);
 	}
 
 	log_msg(L_INFO, "export: %s (fsid=%lx:%lx) ro=%d alldirs=%d "
 	    "net=%s",
 	    ex->path,
-	    (unsigned long)ex->fsid.val[0],
-	    (unsigned long)ex->fsid.val[1],
+	    (unsigned long)ex->fsid_val[0],
+	    (unsigned long)ex->fsid_val[1],
 	    ex->ro, ex->alldirs,
 	    inet_ntoa(ex->net));
 	nexports++;
@@ -313,8 +316,8 @@ conf_lookup(const char *path, struct in_addr client)
 	continue;
 	if (statfs(rp, &sf1) < 0 || statfs(ex->path, &sf2) < 0)
 	continue;
-	if (sf1.f_fsid.val[0] == sf2.f_fsid.val[0] &&
-	    sf1.f_fsid.val[1] == sf2.f_fsid.val[1])
+	if (PORT_FSID_VAL0(sf1) == PORT_FSID_VAL0(sf2) &&
+	    PORT_FSID_VAL1(sf1) == PORT_FSID_VAL1(sf2))
 	return ex;
 	}
 	} else {

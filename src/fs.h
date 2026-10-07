@@ -1,12 +1,12 @@
 #ifndef FS_H
 #define FS_H
 
-#include <sys/mount.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <stdint.h>
 
 #include "fh.h"
+#include "port.h"
 
 /* File attributes for NFS reply */
 struct fs_fattr {

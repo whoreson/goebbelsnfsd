@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "conf.h"
@@ -44,13 +45,13 @@ static void
 usage(void)
 {
 	fprintf(stderr,
-	    "usage: %s [-dv] [-e exports] [-l logfile] [-m mountport]\n"
+	    "usage: unfsd [-dv] [-e exports] [-l logfile] [-m mountport]\n"
 	    "  -d  run in background\n"
 	    "  -e  exports file (default /etc/exports)\n"
 	    "  -v  verbose: log each RPC call\n"
 	    "  -l  log to file (reopened on SIGHUP)\n"
 	    "  -m  MOUNT port (default %d)\n",
-	    PROGNAME, MOUNT_PORT_DEFAULT);
+	    MOUNT_PORT_DEFAULT);
 	exit(2);
 }
 
@@ -107,7 +108,7 @@ main(int argc, char **argv)
 	usage();
 
 	if (logfile != NULL && log_open(logfile) < 0) {
-	fprintf(stderr, "%s: cannot open %s: %s\n", PROGNAME,
+	fprintf(stderr, "cannot open %s: %s\n",
 	    logfile, strerror(errno));
 	return 1;
 	}

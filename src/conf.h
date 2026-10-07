@@ -18,7 +18,7 @@ struct export {
 	int              maproot_set;
 	int              alldirs;
 	int              ro;
-	fsid_t           fsid;
+	uint32_t         fsid_val[2];
 };
 
 int  conf_load(const char *path);

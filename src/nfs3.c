@@ -1,5 +1,4 @@
 #include <sys/stat.h>
-#include <sys/mount.h>
 #include <sys/param.h>
 #include <sys/un.h>
 #include <sys/socket.h>
@@ -10,6 +9,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include "port.h"
 
 #include "progs.h"
 #include "rpc.h"
@@ -270,7 +270,7 @@ nfs3_lookup(struct req *r)
 	}
 
 	/* Resolve directory path from file handle */
-	dfd = fhopen(&fh, O_RDONLY);
+	dfd = PORT_FHOPEN(&fh, O_RDONLY);
 	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
 	(void)close(dfd);
 	xdr_put_u32(&r->out, NFSERR_IO);
@@ -280,7 +280,7 @@ nfs3_lookup(struct req *r)
 	(void)close(dfd);
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 
-	if (lgetfh(fullpath, &fh_child) < 0) {
+	if (port_lgetfh(fullpath, &fh_child) < 0) {
 	xdr_put_u32(&r->out, NFSERR_NOENT);
 	enc_postop_attr(&r->out, &nfh);
 	return PROC_OK;
@@ -643,7 +643,7 @@ nfs3_readdirplus(struct req *r)
 	}
 
 	/* Resolve directory path for child lookups */
-	dfd = fhopen(&fh, O_RDONLY);
+	dfd = PORT_FHOPEN(&fh, O_RDONLY);
 	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
 	(void)close(dfd);
 	xdr_put_u32(&r->out, NFSERR_IO);
@@ -705,12 +705,12 @@ nfs3_readdirplus(struct req *r)
 	eattr.gid = st.st_gid;
 	eattr.size = st.st_size;
 	eattr.fileid = st.st_ino;
-	eattr.atime_sec = st.st_atimespec.tv_sec;
-	eattr.atime_usec = st.st_atimespec.tv_nsec / 1000;
-	eattr.mtime_sec = st.st_mtimespec.tv_sec;
-	eattr.mtime_usec = st.st_mtimespec.tv_nsec / 1000;
-	eattr.ctime_sec = st.st_ctimespec.tv_sec;
-	eattr.ctime_usec = st.st_ctimespec.tv_nsec / 1000;
+	eattr.atime_sec = st.PORT_ST_ATIM.tv_sec;
+	eattr.atime_usec = st.PORT_ST_ATIM.tv_nsec / 1000;
+	eattr.mtime_sec = st.PORT_ST_MTIM.tv_sec;
+	eattr.mtime_usec = st.PORT_ST_MTIM.tv_nsec / 1000;
+	eattr.ctime_sec = st.PORT_ST_CTIM.tv_sec;
+	eattr.ctime_usec = st.PORT_ST_CTIM.tv_nsec / 1000;
 
 	size_t namelen = strlen(name);
 	size_t entry_size = 4 + 8 + 4 + XDR_PAD(namelen) + 8 + 88 + 88;
@@ -732,7 +732,7 @@ nfs3_readdirplus(struct req *r)
 	{
 	fhandle_t fh_child;
 	struct nfs_fh child_nfh;
-	if (lgetfh(fullpath, &fh_child) == 0) {
+	if (port_lgetfh(fullpath, &fh_child) == 0) {
 	fh_encode(&child_nfh, &fh_child);
 	fh_path_cache_add(&child_nfh, fullpath);
 	xdr_put_u32(&r->out, 1);  /* handle_follows */
@@ -892,7 +892,7 @@ nfs3_resolve_dirpath(const struct nfs_fh *nfh, char *dirpath, size_t dirpathsz)
 
 	if (fh_decode(nfh, &fh) < 0)
 	return -1;
-	dfd = fhopen(&fh, O_RDONLY);
+	dfd = PORT_FHOPEN(&fh, O_RDONLY);
 	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, dirpathsz) == NULL) {
 	(void)close(dfd);
 	return -1;
@@ -1132,7 +1132,7 @@ nfs3_create(struct req *r)
 	(void)chown(fullpath, uid_set ? new_uid : -1, gid_set ? new_gid : -1);
 	}
 
-	if (lgetfh(fullpath, &fh_child) < 0) {
+	if (port_lgetfh(fullpath, &fh_child) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
 	}
@@ -1213,7 +1213,7 @@ nfs3_mkdir(struct req *r)
 	(void)chown(fullpath, uid_set ? new_uid : -1, gid_set ? new_gid : -1);
 	}
 
-	if (lgetfh(fullpath, &fh_child) < 0) {
+	if (port_lgetfh(fullpath, &fh_child) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
 	}
@@ -1305,7 +1305,7 @@ nfs3_symlink(struct req *r)
 	(void)lchown(fullpath, uid_set ? new_uid : -1, gid_set ? new_gid : -1);
 	}
 
-	if (lgetfh(fullpath, &fh_child) < 0) {
+	if (port_lgetfh(fullpath, &fh_child) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
 	}
@@ -1435,12 +1435,12 @@ nfs3_mknod(struct req *r)
 	post_attr.gid = st.st_gid;
 	post_attr.size = st.st_size;
 	post_attr.fileid = st.st_ino;
-	post_attr.atime_sec = st.st_atimespec.tv_sec;
-	post_attr.atime_usec = st.st_atimespec.tv_nsec / 1000;
-	post_attr.mtime_sec = st.st_mtimespec.tv_sec;
-	post_attr.mtime_usec = st.st_mtimespec.tv_nsec / 1000;
-	post_attr.ctime_sec = st.st_ctimespec.tv_sec;
-	post_attr.ctime_usec = st.st_ctimespec.tv_nsec / 1000;
+	post_attr.atime_sec = st.PORT_ST_ATIM.tv_sec;
+	post_attr.atime_usec = st.PORT_ST_ATIM.tv_nsec / 1000;
+	post_attr.mtime_sec = st.PORT_ST_MTIM.tv_sec;
+	post_attr.mtime_usec = st.PORT_ST_MTIM.tv_nsec / 1000;
+	post_attr.ctime_sec = st.PORT_ST_CTIM.tv_sec;
+	post_attr.ctime_usec = st.PORT_ST_CTIM.tv_nsec / 1000;
 	}
 
 	(void)fs_getattr(&dir_fh, &dir_post_attr);

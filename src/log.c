@@ -9,6 +9,10 @@
 
 #include "log.h"
 
+#ifndef PROGNAME
+#define PROGNAME "unfsd"
+#endif
+
 #define LOG_LINE	1024
 
 static int  log_fd = 2;

@@ -1,8 +1,8 @@
 #ifndef FH_H
 #define FH_H
 
-#include <sys/mount.h>
 #include <stdint.h>
+#include "port.h"
 
 #define NFS_FH_MAGIC	0x55fdu
 #define NFS_FH_SIZE	32

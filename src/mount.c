@@ -8,6 +8,7 @@
 #include "fh.h"
 #include "fs.h"
 #include "log.h"
+#include "port.h"
 #include "progs.h"
 #include "rpc.h"
 
@@ -110,16 +111,18 @@ mnt1_mnt(struct req *r)
 	return PROC_OK;
 	}
 
-	if (lgetfh(path, &fh) < 0) {
+	if (port_lgetfh(path, &fh) < 0) {
 	xdr_put_u32(&r->out, 5);
 	return PROC_OK;
 	}
 
-	if (fh.fh_fsid.val[0] != ex->fsid.val[0] ||
-	    fh.fh_fsid.val[1] != ex->fsid.val[1]) {
+#ifdef __FreeBSD__
+	if (fh.fh_fsid.val[0] != ex->fsid_val[0] ||
+	    fh.fh_fsid.val[1] != ex->fsid_val[1]) {
 	xdr_put_u32(&r->out, 2);
 	return PROC_OK;
 	}
+#endif
 
 	nstat = 0;
 	xdr_put_u32(&r->out, nstat);
@@ -158,16 +161,18 @@ mnt3_mnt(struct req *r)
 	return PROC_OK;
 	}
 
-	if (lgetfh(path, &fh) < 0) {
+	if (port_lgetfh(path, &fh) < 0) {
 	xdr_put_u32(&r->out, MNT3ERR_IO);
 	return PROC_OK;
 	}
 
-	if (fh.fh_fsid.val[0] != ex->fsid.val[0] ||
-	    fh.fh_fsid.val[1] != ex->fsid.val[1]) {
+#ifdef __FreeBSD__
+	if (fh.fh_fsid.val[0] != ex->fsid_val[0] ||
+	    fh.fh_fsid.val[1] != ex->fsid_val[1]) {
 	xdr_put_u32(&r->out, MNT3ERR_NOENT);
 	return PROC_OK;
 	}
+#endif
 
 	/* MNT3_OK */
 	xdr_put_u32(&r->out, MNT3_OK);
