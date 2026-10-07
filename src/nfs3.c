@@ -615,12 +615,157 @@ nfs3_readdir(struct req *r)
 	return PROC_OK;
 }
 
-/* READDIRPLUS - return NOTSUPP to fall back to READDIR */
+/* READDIRPLUS - like READDIR but with post_op_attr for each entry */
 static int
 nfs3_readdirplus(struct req *r)
 {
-	(void)r;
-	xdr_put_u32(&r->out, NFSERR_NOTSUPP);
+	struct nfs_fh nfh;
+	fhandle_t fh;
+	uint64_t cookie;
+	uint32_t count;
+	DIR *dirp;
+	uint64_t inode;
+	char name[256];
+	int rc, done = 0, eof_reached = 0;
+	struct fs_fattr attr;
+	char dirpath[512];
+	int dfd;
+
+	if (dec_fh3(&r->in, &nfh) < 0)
+	return PROC_GARBAGE;
+	cookie = xdr_get_u64(&r->in);
+	(void)xdr_get_u32(&r->in);  /* cookieverf[0] */
+	(void)xdr_get_u32(&r->in);  /* cookieverf[1] */
+	count = xdr_get_u32(&r->in);
+	if (!xdr_ok(&r->in))
+	return PROC_GARBAGE;
+	if (count > NFS3_MAXRDIR)
+	count = NFS3_MAXRDIR;
+	if (fh_lookup_export(&nfh) == NULL) {
+	xdr_put_u32(&r->out, NFSERR_STALE);
+	return PROC_OK;
+	}
+	if (fh_decode(&nfh, &fh) < 0 || fs_getattr(&fh, &attr) != NFS_OK) {
+	xdr_put_u32(&r->out, NFSERR_STALE);
+	return PROC_OK;
+	}
+	if (!S_ISDIR(attr.mode)) {
+	xdr_put_u32(&r->out, NFSERR_NOTDIR);
+	return PROC_OK;
+	}
+
+	/* Resolve directory path for child lookups */
+	dfd = fhopen(&fh, O_RDONLY);
+	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
+	(void)close(dfd);
+	xdr_put_u32(&r->out, NFSERR_IO);
+	return PROC_OK;
+	}
+	(void)close(dfd);
+
+	if (fs_opendir(&fh, &dirp) < 0) {
+	xdr_put_u32(&r->out, NFSERR_IO);
+	return PROC_OK;
+	}
+
+	/* Skip to cookie */
+	{
+	uint64_t cur = 0;
+	while (cur < cookie) {
+	rc = fs_readdir(dirp, &inode, name, sizeof(name));
+	if (rc != 0) {
+	done = 1;
+	break;
+	}
+	cur++;
+	}
+	}
+
+	xdr_put_u32(&r->out, NFS_OK);
+	enc_postop_attr(&r->out, &nfh);
+	xdr_put_u32(&r->out, 0);  /* cookieverf */
+	xdr_put_u32(&r->out, 0);
+
+	/* Write entries with post_op_attr */
+	{
+	uint64_t cur = cookie;
+	while (!done) {
+	rc = fs_readdir(dirp, &inode, name, sizeof(name));
+	if (rc != 0) {
+	done = 1;
+	eof_reached = 1;
+	continue;
+	}
+	if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+	cur++;
+	continue;
+	}
+
+	{
+	char fullpath[512];
+	struct stat st;
+	struct fs_fattr eattr;
+
+	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
+	if (lstat(fullpath, &st) < 0) {
+	cur++;
+	continue;
+	}
+	eattr.mode = st.st_mode;
+	eattr.nlink = st.st_nlink;
+	eattr.uid = st.st_uid;
+	eattr.gid = st.st_gid;
+	eattr.size = st.st_size;
+	eattr.fileid = st.st_ino;
+	eattr.atime_sec = st.st_atimespec.tv_sec;
+	eattr.atime_usec = st.st_atimespec.tv_nsec / 1000;
+	eattr.mtime_sec = st.st_mtimespec.tv_sec;
+	eattr.mtime_usec = st.st_mtimespec.tv_nsec / 1000;
+	eattr.ctime_sec = st.st_ctimespec.tv_sec;
+	eattr.ctime_usec = st.st_ctimespec.tv_nsec / 1000;
+
+	size_t namelen = strlen(name);
+	size_t entry_size = 4 + 8 + 4 + XDR_PAD(namelen) + 8 + 88 + 88;
+	if (xdr_pos(&r->out) + entry_size > count + 24) {
+	break;
+	}
+	/* nextentry discriminant = true (more entries follow) */
+	xdr_put_u32(&r->out, 1);
+	/* entryplus3: fileid + name + cookie + name_attributes + name_handle */
+	xdr_put_u32(&r->out, 0);
+	xdr_put_u32(&r->out, (uint32_t)inode);
+	xdr_put_string(&r->out, name);
+	xdr_put_u32(&r->out, 0);
+	xdr_put_u32(&r->out, (uint32_t)cur);
+	/* name_attributes: post_op_attr (attr_follows + fattr3) */
+	xdr_put_u32(&r->out, 1);  /* attr_follows */
+	nfs3_enc_fattr(&r->out, &eattr);
+	/* name_handle: post_op_fh3 (handle_follows + fhandle3) */
+	{
+	fhandle_t fh_child;
+	struct nfs_fh child_nfh;
+	if (lgetfh(fullpath, &fh_child) == 0) {
+	fh_encode(&child_nfh, &fh_child);
+	fh_path_cache_add(&child_nfh, fullpath);
+	xdr_put_u32(&r->out, 1);  /* handle_follows */
+	enc_fh3(&r->out, &child_nfh);
+	} else {
+	xdr_put_u32(&r->out, 0);  /* handle_follows = false */
+	}
+	}
+	}
+	cur++;
+	}
+	}
+
+	/* nextentry = false */
+	xdr_put_u32(&r->out, 0);
+
+	/* eof */
+	xdr_put_u32(&r->out, eof_reached ? 1 : 0);
+
+	(void)closedir(dirp);
+	log_msg(L_DEBUG, "READDIRPLUS done eof=%d", eof_reached);
 	return PROC_OK;
 }
 
