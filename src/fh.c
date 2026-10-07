@@ -1,4 +1,5 @@
 #include <string.h>
+#include <fcntl.h>
 #include <sys/mount.h>
 #include <sys/param.h>
 
@@ -144,6 +145,59 @@ fh_lookup_export(const struct nfs_fh *nfh)
 	ex = conf_get_export(i);
 	if (ex->fsid.val[0] == fsid0 && ex->fsid.val[1] == fsid1)
 	return ex;
+	}
+
+	/*
+	 * fsid didn't match any export root. This can happen when the file
+	 * is on a different filesystem (e.g., ZFS dataset) mounted under
+	 * the export point. Try to resolve the path from the file handle
+	 * and find an export that covers it.
+	 */
+	{
+	fhandle_t fh;
+	char path[512];
+	int fd;
+
+	if (fh_decode(nfh, &fh) < 0)
+	return NULL;
+
+	/* First try path cache (fast path for previously seen fhs) */
+	{
+	const char *cpath = fh_path_cache_get(nfh);
+	if (cpath != NULL) {
+	for (i = 0; i < conf_export_count(); i++) {
+	ex = conf_get_export(i);
+	if (strncmp(cpath, ex->path, strlen(ex->path)) == 0) {
+	if (cpath[strlen(ex->path)] == '\0' ||
+	    cpath[strlen(ex->path)] == '/')
+	return ex;
+	}
+	}
+	}
+	}
+
+	/* Fallback: resolve path via fhopen+fchdir+getcwd */
+	fd = fhopen(&fh, O_RDONLY);
+	if (fd < 0)
+	return NULL;
+	if (fchdir(fd) == 0 && getcwd(path, sizeof(path)) != NULL) {
+	(void)close(fd);
+	/* Check if path is under any export */
+	for (i = 0; i < conf_export_count(); i++) {
+	ex = conf_get_export(i);
+	if (strncmp(path, ex->path, strlen(ex->path)) == 0) {
+	if (path[strlen(ex->path)] == '\0' ||
+	    path[strlen(ex->path)] == '/')
+	return ex;
+	}
+	}
+	} else {
+	/* fchdir failed (not a directory). Try parent via fhstat. */
+	/* For regular files, we can't fchdir. Check if fhstat works
+	   to verify the handle is valid, then fall back to checking
+	   if the fsid is a known sub-mount of any export. */
+	(void)close(fd);
+	}
 	}
 	return NULL;
 }
