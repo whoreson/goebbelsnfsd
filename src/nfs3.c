@@ -1089,20 +1089,15 @@ nfs3_create(struct req *r)
 	return PROC_OK;
 	}
 
-	/* Check write access */
-	if (fh_lookup_export(&dir_nfh)->ro) {
-	xdr_put_u32(&r->out, NFSERR_ROFS);
-	return PROC_OK;
-	}
+	if (fh_lookup_export(&dir_nfh)->ro) { xdr_put_u32(&r->out, NFSERR_ROFS); return PROC_OK; }
 
-	/* Decode createhow3 */
 	how_mode = xdr_get_u32(&r->in);
-	/* Decode sattr3 fields */
-	uint32_t new_mode, new_uid, new_gid;
-	int uid_set, gid_set;
+	/* Decode sattr3 fields. Linux 2.4 NFSv3 client sends truncated sattr3,
+	 * so we use defaults when the data is incomplete. */
+	uint32_t new_mode = 0666, new_uid = 0, new_gid = 0;
+	int uid_set = 0, gid_set = 0;
+	if (xdr_ok(&r->in))
 	nfs3_decode_sattr3_mode_uid_gid(&r->in, &new_mode, &new_uid, &new_gid, &uid_set, &gid_set);
-	if (!xdr_ok(&r->in))
-	return PROC_GARBAGE;
 	/* Ensure mode is never 0 (Linux 2.4 mount creates files with mode 0) */
 	if ((new_mode & 07777) == 0)
 	new_mode |= 0600;
