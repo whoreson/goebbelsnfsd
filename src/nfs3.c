@@ -518,7 +518,8 @@ nfs3_readdir(struct req *r)
 	return PROC_GARBAGE;
 	if (count > NFS3_MAXRDIR)
 	count = NFS3_MAXRDIR;
-	if (fh_lookup_export(&nfh) == NULL) {
+	const struct export *readdir_export = fh_lookup_export(&nfh);
+	if (readdir_export == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -627,7 +628,8 @@ nfs3_readdirplus(struct req *r)
 	return PROC_GARBAGE;
 	if (count > NFS3_MAXRDIR)
 	count = NFS3_MAXRDIR;
-	if (fh_lookup_export(&nfh) == NULL) {
+	const struct export *readdirplus_export = fh_lookup_export(&nfh);
+	if (readdirplus_export == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -692,6 +694,7 @@ nfs3_readdirplus(struct req *r)
 	struct stat st;
 	struct fs_fattr eattr;
 
+	memset(&eattr, 0, sizeof(eattr));
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 	if (lstat(fullpath, &st) < 0) {
 	cur++;
@@ -703,6 +706,8 @@ nfs3_readdirplus(struct req *r)
 	eattr.gid = st.st_gid;
 	eattr.size = st.st_size;
 	eattr.fileid = st.st_ino;
+	eattr.fsid = ((uint64_t)readdirplus_export->fsid_val[0] << 32) |
+	    readdirplus_export->fsid_val[1];
 	eattr.atime_sec = st.PORT_ST_ATIM.tv_sec;
 	eattr.atime_usec = st.PORT_ST_ATIM.tv_nsec / 1000;
 	eattr.mtime_sec = st.PORT_ST_MTIM.tv_sec;
