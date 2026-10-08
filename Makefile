@@ -10,8 +10,7 @@ HDRS=	src/log.h src/xdr.h src/rpc.h src/types.h src/net.h \
 
 CC?=	cc
 CFLAGS=	-O2 -g -Wall -Wextra -Wno-long-long \
-	-Wshadow -Wpointer-arith -Wcast-qual -Wwrite-strings \
-	-DPROGNAME=\"$(PROG)\"
+	-Wshadow -Wpointer-arith -Wcast-qual -Wwrite-strings
 
 all: $(PROG)
 

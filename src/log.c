@@ -96,6 +96,10 @@ log_msg(int level, const char *fmt, ...)
 	if (tm != NULL)
 		(void)strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", tm);
 
+	#ifndef PROGNAME
+#define PROGNAME "unfsd"
+#endif
+
 	n = snprintf(line, sizeof(line), "%s %s[%ld] %s: ", ts, PROGNAME,
 	    (long)getpid(), names[level]);
 	if (n < 0 || (size_t)n >= sizeof(line) - 2)
