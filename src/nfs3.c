@@ -185,6 +185,19 @@ nfs3_setattr(struct req *r)
 
 	/* Get path for operations */
 	cpath = fh_path_cache_get(&nfh);
+	if (cpath == NULL) {
+	/* Fallback: resolve handle via fhopen+fchdir+getcwd */
+	int dfd = PORT_FHOPEN(&fh, O_RDONLY);
+	char tmp[512];
+	if (dfd >= 0) {
+	(void)fchdir(dfd);
+	(void)close(dfd);
+	if (getcwd(tmp, sizeof(tmp)) != NULL) {
+	cpath = tmp;
+	log_msg(L_DEBUG, "nfs3_setattr: path_cache_miss, resolved to %s", cpath);
+	}
+	}
+	}
 	log_msg(L_DEBUG, "nfs3_setattr: cpath=%s", cpath ? cpath : "(null)");
 	if (cpath == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
