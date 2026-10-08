@@ -59,6 +59,18 @@ dec_fh3(struct xdr *x, struct nfs_fh *nfh)
 /*
  * post_op_attr: attr_follows(1) + fattr(if true)
  */
+/* Fix fsid in fattr to match the export's statfs() fsid, ensuring Linux
+ * NFS clients (which validate post_op_attr.fa_fsid against nfs_server->fsid)
+ * don't reject child handles as stale. */
+static void
+nfs3_fix_fattr_fsid(struct fs_fattr *attr, const struct export *ex)
+{
+	if (ex != NULL) {
+	attr->fsid = (((uint64_t)ex->fsid_val[0]) << 32) |
+	    (uint64_t)(uint32_t)ex->fsid_val[1];
+	}
+}
+
 /* Encode post_op_attr by decoding fh and getting attributes */
 static void
 enc_postop_attr(struct xdr *x, const struct nfs_fh *nfh)
@@ -73,6 +85,8 @@ enc_postop_attr(struct xdr *x, const struct nfs_fh *nfh)
 	(void)ok;
 	if (ok) {
 	xdr_put_u32(x, 1);
+	const struct export *ex = fh_lookup_export(nfh);
+	nfs3_fix_fattr_fsid(&attr, ex);
 	nfs3_enc_fattr(x, &attr);
 	} else {
 	xdr_put_u32(x, 0);
@@ -87,10 +101,12 @@ nfs3_getattr(struct req *r)
 	fhandle_t fh;
 	struct fs_fattr attr;
 	uint32_t nstat;
+	const struct export *ex;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
-	if (fh_lookup_export(&nfh) == NULL) {
+	ex = fh_lookup_export(&nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -104,6 +120,7 @@ nfs3_getattr(struct req *r)
 	return PROC_OK;
 	}
 	xdr_put_u32(&r->out, NFS_OK);
+	nfs3_fix_fattr_fsid(&attr, ex);
 	nfs3_enc_fattr(&r->out, &attr);
 	return PROC_OK;
 }
@@ -245,7 +262,9 @@ nfs3_setattr(struct req *r)
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
+	nfs3_fix_fattr_fsid(&pre_attr, ex);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	nfs3_fix_fattr_fsid(&post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &post_attr);
 	return PROC_OK;
 }
@@ -436,6 +455,7 @@ nfs3_read(struct req *r)
 	uint32_t count;
 	int fd;
 	ssize_t n;
+	const struct export *ex;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
@@ -445,7 +465,8 @@ nfs3_read(struct req *r)
 	return PROC_GARBAGE;
 	if (count > NFS3_MAXDATA)
 	count = NFS3_MAXDATA;
-	if (fh_lookup_export(&nfh) == NULL) {
+	ex = fh_lookup_export(&nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -491,6 +512,7 @@ nfs3_read(struct req *r)
 
 	/* reply: status + postop_attr + count + eof + data_len + data */
 	xdr_put_u32(&r->out, NFS_OK);
+	nfs3_fix_fattr_fsid(&attr, ex);
 	enc_postop_attr_fattr(&r->out, &attr);
 	{
 	size_t count_mark = xdr_pos(&r->out);
@@ -530,7 +552,8 @@ nfs3_readdir(struct req *r)
 	return PROC_GARBAGE;
 	if (count > NFS3_MAXRDIR)
 	count = NFS3_MAXRDIR;
-	if (fh_lookup_export(&nfh) == NULL) {
+	const struct export *readdir_export = fh_lookup_export(&nfh);
+	if (readdir_export == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -562,6 +585,7 @@ nfs3_readdir(struct req *r)
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
+	nfs3_fix_fattr_fsid(&attr, readdir_export);
 	enc_postop_attr_fattr(&r->out, &attr);
 	xdr_put_u32(&r->out, 0);  /* cookieverf */
 	xdr_put_u32(&r->out, 0);
@@ -681,6 +705,7 @@ nfs3_readdirplus(struct req *r)
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
+	nfs3_fix_fattr_fsid(&attr, readdirplus_export);
 	enc_postop_attr_fattr(&r->out, &attr);
 	xdr_put_u32(&r->out, 0);  /* cookieverf */
 	xdr_put_u32(&r->out, 0);
@@ -725,12 +750,9 @@ nfs3_readdirplus(struct req *r)
 	eattr.ctime_sec = st.PORT_ST_CTIM.tv_sec;
 	eattr.ctime_usec = st.PORT_ST_CTIM.tv_nsec / 1000;
 
-	/* Get child handle first so we can extract its fsid */
+	/* Get child handle for post_op_fh3 */
 	int have_fh = (port_lgetfh(fullpath, &fh_child) == 0);
-	if (have_fh) {
-	eattr.fsid = (((uint64_t)fh_child.fh_fsid.val[0]) << 32) |
-	    (uint64_t)(uint32_t)fh_child.fh_fsid.val[1];
-	}
+	(void)have_fh;
 
 	size_t namelen = strlen(name);
 	size_t entry_size = 4 + 8 + 4 + XDR_PAD(namelen) + 8 + 88 + 88;
@@ -747,6 +769,7 @@ nfs3_readdirplus(struct req *r)
 	xdr_put_u32(&r->out, (uint32_t)cur);
 	/* name_attributes: post_op_attr (attr_follows + fattr3) */
 	xdr_put_u32(&r->out, 1);  /* attr_follows */
+	nfs3_fix_fattr_fsid(&eattr, readdirplus_export);
 	nfs3_enc_fattr(&r->out, &eattr);
 	/* name_handle: post_op_fh3 (handle_follows + fhandle3) */
 	{
@@ -961,6 +984,7 @@ nfs3_write(struct req *r)
 	int fd;
 	ssize_t n;
 	uint8_t *buf;
+	const struct export *ex;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
@@ -975,7 +999,8 @@ nfs3_write(struct req *r)
 	if (dlen > count)
 	dlen = count;
 
-	if (fh_lookup_export(&nfh) == NULL) {
+	ex = fh_lookup_export(&nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -985,7 +1010,7 @@ nfs3_write(struct req *r)
 	}
 
 	/* Check write access */
-	if (fh_lookup_export(&nfh)->ro) {
+	if (ex->ro) {
 	/* consume data */
 	uint8_t *skip = malloc(dlen);
 	if (skip) { xdr_get_fixed(&r->in, skip, dlen); free(skip); }
@@ -1040,7 +1065,9 @@ nfs3_write(struct req *r)
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
+	nfs3_fix_fattr_fsid(&pre_attr, ex);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	nfs3_fix_fattr_fsid(&post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &post_attr);
 	xdr_put_u32(&r->out, (uint32_t)n);  /* count */
 	xdr_put_u32(&r->out, 2);  /* committed = FILESYNC */
@@ -1058,13 +1085,15 @@ nfs3_commit(struct req *r)
 	struct fs_fattr pre_attr, post_attr;
 	const char *cpath;
 	int fd;
+	const struct export *ex;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
 	(void)xdr_get_u64(&r->in);  /* offset */
 	(void)xdr_get_u32(&r->in);  /* count */
 
-	if (fh_lookup_export(&nfh) == NULL) {
+	ex = fh_lookup_export(&nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -1091,7 +1120,9 @@ nfs3_commit(struct req *r)
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
+	nfs3_fix_fattr_fsid(&pre_attr, ex);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	nfs3_fix_fattr_fsid(&post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &post_attr);
 	xdr_put_u32(&r->out, nfs3_wverf[0]);
 	xdr_put_u32(&r->out, nfs3_wverf[1]);
@@ -1111,6 +1142,7 @@ nfs3_create(struct req *r)
 	struct nfs_fh child_nfh;
 	int fd;
 	uint32_t how_mode;
+	const struct export *ex;
 
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
@@ -1118,7 +1150,8 @@ nfs3_create(struct req *r)
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
-	if (fh_lookup_export(&dir_nfh) == NULL) {
+	ex = fh_lookup_export(&dir_nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -1127,7 +1160,7 @@ nfs3_create(struct req *r)
 	return PROC_OK;
 	}
 
-	if (fh_lookup_export(&dir_nfh)->ro) { xdr_put_u32(&r->out, NFSERR_ROFS); return PROC_OK; }
+	if (ex->ro) { xdr_put_u32(&r->out, NFSERR_ROFS); return PROC_OK; }
 
 	how_mode = xdr_get_u32(&r->in);
 	/* Decode sattr3 fields. Linux 2.4 NFSv3 client sends truncated sattr3,
@@ -1183,8 +1216,11 @@ nfs3_create(struct req *r)
 	xdr_put_u32(&r->out, NFS_OK);
 	/* CREATE3resok: obj(post_op_fh3) + obj_attr(post_op_attr) + dir_wcc(wcc_data) */
 	enc_postop_fh3(&r->out, &child_nfh);
+	nfs3_fix_fattr_fsid(&post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &post_attr);
+	nfs3_fix_fattr_fsid(&pre_attr, ex);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	nfs3_fix_fattr_fsid(&dir_post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &dir_post_attr);
 	return PROC_OK;
 }
@@ -1200,6 +1236,7 @@ nfs3_mkdir(struct req *r)
 	char dirpath[512], fullpath[512];
 	fhandle_t fh_child;
 	struct nfs_fh child_nfh;
+	const struct export *ex;
 
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
@@ -1208,7 +1245,8 @@ nfs3_mkdir(struct req *r)
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
 
-	if (fh_lookup_export(&dir_nfh) == NULL) {
+	ex = fh_lookup_export(&dir_nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -1216,7 +1254,7 @@ nfs3_mkdir(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (ex->ro) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -1263,8 +1301,11 @@ nfs3_mkdir(struct req *r)
 	xdr_put_u32(&r->out, NFS_OK);
 	/* MKDIR3resok: obj(post_op_fh3) + obj_attr(post_op_attr) + dir_wcc(wcc_data) */
 	enc_postop_fh3(&r->out, &child_nfh);
+	nfs3_fix_fattr_fsid(&post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &post_attr);
+	nfs3_fix_fattr_fsid(&pre_attr, ex);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	nfs3_fix_fattr_fsid(&dir_post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &dir_post_attr);
 	log_msg(L_DEBUG, "nfs3_mkdir: success");
 	return PROC_OK;
@@ -1276,11 +1317,12 @@ nfs3_symlink(struct req *r)
 {
 	struct nfs_fh dir_nfh;
 	fhandle_t dir_fh;
-	struct fs_fattr pre_attr, post_attr;
+	struct fs_fattr pre_attr, post_attr, dir_post_attr;
 	char target[1024], name[256];
 	char dirpath[512], fullpath[512];
 	fhandle_t fh_child;
 	struct nfs_fh child_nfh;
+	const struct export *ex;
 
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
@@ -1307,7 +1349,8 @@ nfs3_symlink(struct req *r)
 	return PROC_GARBAGE;
 	target[sizeof(target)-1] = '\0';
 
-	if (fh_lookup_export(&dir_nfh) == NULL) {
+	ex = fh_lookup_export(&dir_nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -1315,7 +1358,7 @@ nfs3_symlink(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (ex->ro) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -1349,14 +1392,16 @@ nfs3_symlink(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	struct fs_fattr dir_post_attr;
 	(void)fs_getattr(&dir_fh, &dir_post_attr);
 
 	xdr_put_u32(&r->out, NFS_OK);
 	/* SYMLINK3resok: obj(post_op_fh3) + obj_attr(post_op_attr) + dir_wcc(wcc_data) */
 	enc_postop_fh3(&r->out, &child_nfh);
+	nfs3_fix_fattr_fsid(&post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &post_attr);
+	nfs3_fix_fattr_fsid(&pre_attr, ex);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	nfs3_fix_fattr_fsid(&dir_post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &dir_post_attr);
 	log_msg(L_DEBUG, "nfs3_symlink: success");
 	return PROC_OK;
@@ -1374,6 +1419,7 @@ nfs3_mknod(struct req *r)
 	fhandle_t fh_child;
 	struct nfs_fh child_nfh;
 	uint32_t type;
+	const struct export *ex;
 	uint32_t new_mode, new_uid, new_gid;
 	int uid_set, gid_set;
 
@@ -1383,7 +1429,8 @@ nfs3_mknod(struct req *r)
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
-	if (fh_lookup_export(&dir_nfh) == NULL) {
+	ex = fh_lookup_export(&dir_nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -1392,7 +1439,7 @@ nfs3_mknod(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (ex->ro) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -1482,8 +1529,11 @@ nfs3_mknod(struct req *r)
 	/* handle_follows=0 so client does LOOKUP fallback for the new file */
 	xdr_put_u32(&r->out, NFS_OK);
 	xdr_put_u32(&r->out, 0); /* handle_follows = false */
+	nfs3_fix_fattr_fsid(&post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &post_attr);
+	nfs3_fix_fattr_fsid(&pre_attr, ex);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	nfs3_fix_fattr_fsid(&dir_post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &dir_post_attr);
 	return PROC_OK;
 }
@@ -1497,6 +1547,7 @@ nfs3_remove(struct req *r)
 	struct fs_fattr pre_attr, post_attr;
 	char name[256];
 	char dirpath[512], fullpath[512];
+	const struct export *ex;
 
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
@@ -1505,7 +1556,8 @@ nfs3_remove(struct req *r)
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
 
-	if (fh_lookup_export(&dir_nfh) == NULL) {
+	ex = fh_lookup_export(&dir_nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -1513,7 +1565,7 @@ nfs3_remove(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (ex->ro) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -1535,7 +1587,9 @@ nfs3_remove(struct req *r)
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
+	nfs3_fix_fattr_fsid(&pre_attr, ex);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	nfs3_fix_fattr_fsid(&post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &post_attr);
 	return PROC_OK;
 }
@@ -1549,6 +1603,7 @@ nfs3_rmdir(struct req *r)
 	struct fs_fattr pre_attr, post_attr;
 	char name[256];
 	char dirpath[512], fullpath[512];
+	const struct export *ex;
 
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
@@ -1557,7 +1612,8 @@ nfs3_rmdir(struct req *r)
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
 
-	if (fh_lookup_export(&dir_nfh) == NULL) {
+	ex = fh_lookup_export(&dir_nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -1565,7 +1621,7 @@ nfs3_rmdir(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (ex->ro) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -1587,7 +1643,9 @@ nfs3_rmdir(struct req *r)
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
+	nfs3_fix_fattr_fsid(&pre_attr, ex);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	nfs3_fix_fattr_fsid(&post_attr, ex);
 	enc_postop_attr_fattr(&r->out, &post_attr);
 	return PROC_OK;
 }
@@ -1601,6 +1659,7 @@ nfs3_rename(struct req *r)
 	struct fs_fattr from_pre, from_post, to_pre, to_post;
 	char from_name[256], to_name[256];
 	char from_path[512], to_path[512], from_full[512], to_full[512];
+	const struct export *from_ex, *to_ex;
 
 	if (dec_fh3(&r->in, &from_nfh) < 0)
 	return PROC_GARBAGE;
@@ -1616,11 +1675,13 @@ nfs3_rename(struct req *r)
 	return PROC_GARBAGE;
 	to_name[sizeof(to_name)-1] = '\0';
 
-	if (fh_lookup_export(&from_nfh) == NULL) {
+	from_ex = fh_lookup_export(&from_nfh);
+	if (from_ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&to_nfh) == NULL) {
+	to_ex = fh_lookup_export(&to_nfh);
+	if (to_ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -1632,7 +1693,7 @@ nfs3_rename(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&from_nfh)->ro || fh_lookup_export(&to_nfh)->ro) {
+	if (from_ex->ro || to_ex->ro) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -1661,10 +1722,14 @@ nfs3_rename(struct req *r)
 
 	xdr_put_u32(&r->out, NFS_OK);
 	/* fromdir wcc */
+	nfs3_fix_fattr_fsid(&from_pre, from_ex);
 	nfs3_enc_pre_op_attr(&r->out, &from_pre);
+	nfs3_fix_fattr_fsid(&from_post, from_ex);
 	enc_postop_attr_fattr(&r->out, &from_post);
 	/* todir wcc */
+	nfs3_fix_fattr_fsid(&to_pre, to_ex);
 	nfs3_enc_pre_op_attr(&r->out, &to_pre);
+	nfs3_fix_fattr_fsid(&to_post, to_ex);
 	enc_postop_attr_fattr(&r->out, &to_post);
 	return PROC_OK;
 }
@@ -1679,6 +1744,7 @@ nfs3_link(struct req *r)
 	char name[256];
 	char dirpath[512], fullpath[512];
 	const char *oldpath;
+	const struct export *file_ex, *dir_ex;
 
 	if (dec_fh3(&r->in, &file_nfh) < 0)
 	return PROC_GARBAGE;
@@ -1689,11 +1755,13 @@ nfs3_link(struct req *r)
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
 
-	if (fh_lookup_export(&file_nfh) == NULL) {
+	file_ex = fh_lookup_export(&file_nfh);
+	if (file_ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh) == NULL) {
+	dir_ex = fh_lookup_export(&dir_nfh);
+	if (dir_ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -1705,7 +1773,7 @@ nfs3_link(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (dir_ex->ro) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -1734,8 +1802,11 @@ nfs3_link(struct req *r)
 
 	xdr_put_u32(&r->out, NFS_OK);
 	/* LINK3resok: obj_attr(post_op_attr) + linkdir_wcc(wcc_data) */
+	nfs3_fix_fattr_fsid(&file_attr, file_ex);
 	enc_postop_attr_fattr(&r->out, &file_attr);
+	nfs3_fix_fattr_fsid(&pre_attr, dir_ex);
 	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	nfs3_fix_fattr_fsid(&post_attr, dir_ex);
 	enc_postop_attr_fattr(&r->out, &post_attr);
 	return PROC_OK;
 }
