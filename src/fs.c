@@ -217,6 +217,18 @@ fs_lookup(const struct export *ex, const char *path,
 	return 0;
 }
 
+long
+fs_telldir(DIR *dirp)
+{
+	return telldir(dirp);
+}
+
+void
+fs_seekdir(DIR *dirp, long offset)
+{
+	seekdir(dirp, offset);
+}
+
 #else /* Linux */
 
 /* Linux: fhandle_t contains dev/fsid/ino. Resolve to path via cache,
@@ -360,6 +372,18 @@ fs_lookup(const struct export *ex, const char *path,
 	if (S_ISLNK(sb.st_mode))
 	*is_symlink = 1;
 	return 0;
+}
+
+long
+fs_telldir(DIR *dirp)
+{
+	return telldir(dirp);
+}
+
+void
+fs_seekdir(DIR *dirp, long offset)
+{
+	seekdir(dirp, offset);
 }
 
 #endif /* __FreeBSD__ */

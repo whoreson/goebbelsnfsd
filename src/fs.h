@@ -55,6 +55,12 @@ int  fs_opendir(const fhandle_t *fh, DIR **dirp);
 /* Read next directory entry. Returns 0 on success, 1 on EOF, -errno. */
 int  fs_readdir(DIR *dirp, uint64_t *inode, char *name, size_t namelen);
 
+/* Get current directory offset (for stable cookies). */
+long fs_telldir(DIR *dirp);
+
+/* Seek to directory offset. */
+void fs_seekdir(DIR *dirp, long offset);
+
 /* Resolve a path within an export. Returns 0 on success, errno on failure.
  * Sets *outfh on success. *is_symlink is set if the result is a symlink. */
 int  fs_lookup(const struct export *ex, const char *path,
