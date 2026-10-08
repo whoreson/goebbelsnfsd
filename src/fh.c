@@ -6,13 +6,16 @@
 #include <sys/mount.h>
 #include <sys/param.h>
 #endif
+#include <string.h>
 #include "fh.h"
 #include "conf.h"
 #include "port.h"
 #include "log.h"
 
 /* Simple LRU path cache for symlinks */
+#ifndef FH_PATH_CACHE_SIZE
 #define FH_PATH_CACHE_SIZE 64
+#endif
 static struct {
 	struct nfs_fh key;
 	char path[256];
@@ -49,7 +52,34 @@ fh_path_cache_get(const struct nfs_fh *nfh)
 	return NULL;
 }
 
-#ifndef __FreeBSD__
+void
+fh_path_cache_add_bypath(const fhandle_t *fh, const char *path)
+{
+	struct nfs_fh tmp;
+	fh_encode(&tmp, fh);
+	fh_path_cache_add(&tmp, path);
+}
+
+#ifdef __FreeBSD__
+const char *
+fh_path_cache_getbyfh(const fhandle_t *fh)
+{
+	size_t i;
+	fhandle_t cfh;
+	for (i = 0; i < FH_PATH_CACHE_SIZE; i++) {
+	if (fh_path_cache[i].path[0] == '\0')
+	continue;
+	if (fh_decode(&fh_path_cache[i].key, &cfh) < 0)
+	continue;
+	if (cfh.fh_fsid.val[0] == fh->fh_fsid.val[0] &&
+	    cfh.fh_fsid.val[1] == fh->fh_fsid.val[1] &&
+	    cfh.fh_fid.fid_len == fh->fh_fid.fid_len &&
+	    memcmp(cfh.fh_fid.fid_data, fh->fh_fid.fid_data, cfh.fh_fid.fid_len) == 0)
+	return fh_path_cache[i].path;
+	}
+	return NULL;
+}
+#else
 const char *
 fh_path_cache_getbyfh(const fhandle_t *fh)
 {
@@ -160,7 +190,7 @@ fh_valid(const struct nfs_fh *nfh)
 	return 0;
 #ifdef __FreeBSD__
 	{
-	uint16_t fid_len = ((uint16_t)nfh->data[12] << 8) | nfh->data[13];
+	uint16_t fid_len = ((uint16_t)nfh->data[2] << 8) | nfh->data[3];
 	if (fid_len == 0 || fid_len > MAXFIDSZ)
 	return 0;
 	}

@@ -466,13 +466,20 @@ nfs2_setattr(struct req *r)
 	return PROC_OK;
 	}
 
-	if (mode != (uint32_t)-1)
+	if (mode != (uint32_t)-1) {
+	log_msg(L_WARN, "nfs2_setattr: chmod(%s, 0%o) mode=%u", cpath, mode, mode);
 	(void)chmod(cpath, mode);
-	if (uid != (uint32_t)-1 || gid != (uint32_t)-1)
+	}
+	if (uid != (uint32_t)-1 || gid != (uint32_t)-1) {
+	log_msg(L_WARN, "nfs2_setattr: lchown(%s, uid=%u, gid=%u)", cpath,
+	    uid == (uint32_t)-1 ? 0 : uid, gid == (uint32_t)-1 ? 0 : gid);
 	(void)lchown(cpath, uid == (uint32_t)-1 ? -1 : uid,
 	    gid == (uint32_t)-1 ? -1 : gid);
-	if (size != (uint32_t)-1)
+	}
+	if (size != (uint32_t)-1) {
+	log_msg(L_WARN, "nfs2_setattr: truncate(%s, %u)", cpath, size);
 	(void)truncate(cpath, size);
+	}
 	if (atime_s != (uint32_t)-1 || mtime_s != (uint32_t)-1) {
 	struct timespec tv[2];
 	struct stat sb;
@@ -494,6 +501,7 @@ nfs2_setattr(struct req *r)
 	struct timeval tvu[2];
 	tvu[0].tv_sec = tv[0].tv_sec; tvu[0].tv_usec = tv[0].tv_nsec / 1000;
 	tvu[1].tv_sec = tv[1].tv_sec; tvu[1].tv_usec = tv[1].tv_nsec / 1000;
+	log_msg(L_WARN, "nfs2_setattr: lutimes(%s, atime=%ld, mtime=%ld)", cpath, (long)tvu[0].tv_sec, (long)tvu[1].tv_sec);
 	(void)lutimes(cpath, tvu);
 	}
 	}

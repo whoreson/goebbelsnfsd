@@ -34,10 +34,8 @@ const struct export *fh_lookup_export(const struct nfs_fh *nfh);
  */
 #define FH_PATH_CACHE_SIZE 4096
 void fh_path_cache_add(const struct nfs_fh *nfh, const char *path);
+void fh_path_cache_add_bypath(const fhandle_t *fh, const char *path);
 const char *fh_path_cache_get(const struct nfs_fh *nfh);
-
-#ifndef __FreeBSD__
 const char *fh_path_cache_getbyfh(const fhandle_t *fh);
-#endif
 
 #endif

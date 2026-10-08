@@ -156,14 +156,8 @@ nfs3_setattr(struct req *r)
 	guard_mtime_set = 0;
 
 	if (!xdr_ok(&r->in)) {
-	log_msg(L_DEBUG, "nfs3_setattr: xdr_ok failed, pos=%zu len=%zu mode=%d uid=%d gid=%d size=%d atime=%d mtime=%d gsz=%d gmt=%d",
-	    r->in.pos, r->in.len,
-	    mode_set, uid_set, gid_set, size_set, atime_set, mtime_set,
-	    guard_size_set, guard_mtime_set);
 	return PROC_GARBAGE;
 	}
-	log_msg(L_DEBUG, "nfs3_setattr: sattr3 decoded ok, mode=%d uid=%d gid=%d size=%d atime=%d mtime=%d",
-	    mode_set, uid_set, gid_set, size_set, atime_set, mtime_set);
 
 	if (fh_decode(&nfh, &fh) < 0 || fs_getattr(&fh, &pre_attr) != NFS_OK) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
@@ -194,21 +188,18 @@ nfs3_setattr(struct req *r)
 	(void)close(dfd);
 	if (getcwd(tmp, sizeof(tmp)) != NULL) {
 	cpath = tmp;
-	log_msg(L_DEBUG, "nfs3_setattr: path_cache_miss, resolved to %s", cpath);
 	}
 	}
 	}
-	log_msg(L_DEBUG, "nfs3_setattr: cpath=%s", cpath ? cpath : "(null)");
 	if (cpath == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
 
-	log_msg(L_DEBUG, "nfs3_setattr: path=%s mode_set=%d uid_set=%d gid_set=%d size_set=%d atime_set=%d mtime_set=%d",
-	    cpath, mode_set, uid_set, gid_set, size_set, atime_set, mtime_set);
-
+	
 	/* Apply changes */
 	if (size_set) {
+	log_msg(L_WARN, "nfs3_setattr: truncate(%s, %llu)", cpath, (unsigned long long)new_size);
 	e = truncate(cpath, (off_t)new_size);
 	if (e < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
@@ -216,6 +207,7 @@ nfs3_setattr(struct req *r)
 	}
 	}
 	if (mode_set) {
+	log_msg(L_WARN, "nfs3_setattr: chmod(%s, 0%o) from mode_set=1", cpath, new_mode);
 	e = chmod(cpath, new_mode);
 	if (e < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
@@ -223,6 +215,8 @@ nfs3_setattr(struct req *r)
 	}
 	}
 	if (uid_set || gid_set) {
+	log_msg(L_WARN, "nfs3_setattr: lchown(%s, uid=%d, gid=%d) from uid_set=%d gid_set=%d", cpath,
+	    uid_set ? new_uid : -1, gid_set ? new_gid : -1, uid_set, gid_set);
 	e = lchown(cpath, uid_set ? new_uid : -1, gid_set ? new_gid : -1);
 	if (e < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
@@ -237,6 +231,8 @@ nfs3_setattr(struct req *r)
 	tv[0].tv_usec = (suseconds_t)(atime_set == 2 ? atime_ns / 1000 : (atime_set == 1 ? now.tv_usec : pre_attr.atime_usec));
 	tv[1].tv_sec = (time_t)(mtime_set == 2 ? mtime_s : (mtime_set == 1 ? now.tv_sec : pre_attr.mtime_sec));
 	tv[1].tv_usec = (suseconds_t)(mtime_set == 2 ? mtime_ns / 1000 : (mtime_set == 1 ? now.tv_usec : pre_attr.mtime_usec));
+	log_msg(L_WARN, "nfs3_setattr: utimes(%s, atime=%ld.%06ld, mtime=%ld.%06ld) atime_set=%d mtime_set=%d",
+	    cpath, (long)tv[0].tv_sec, (long)tv[0].tv_usec, (long)tv[1].tv_sec, (long)tv[1].tv_usec, atime_set, mtime_set);
 	e = utimes(cpath, tv);
 	/* utimes errors are not fatal for setattr */
 	(void)e;
@@ -285,6 +281,7 @@ nfs3_lookup(struct req *r)
 
 	/* Resolve directory path from file handle */
 	if (nfs3_resolve_dirpath(&nfh, dirpath, sizeof(dirpath)) < 0) {
+	log_msg(L_WARN, "LOOKUP3 %s: resolve_dirpath failed", name);
 	xdr_put_u32(&r->out, NFSERR_IO);
 	enc_postop_attr(&r->out, &nfh);
 	return PROC_OK;
@@ -292,6 +289,7 @@ nfs3_lookup(struct req *r)
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 
 	if (port_lgetfh(fullpath, &fh_child) < 0) {
+	log_msg(L_WARN, "LOOKUP3 %s/%s: lgetfh failed %s", dirpath, name, strerror(errno));
 	xdr_put_u32(&r->out, NFSERR_NOENT);
 	enc_postop_attr(&r->out, &nfh);
 	return PROC_OK;
@@ -299,6 +297,7 @@ nfs3_lookup(struct req *r)
 	fh_encode(&child_nfh, &fh_child);
 	fh_path_cache_add(&child_nfh, fullpath);
 
+	log_msg(L_DEBUG, "LOOKUP3 %s/%s -> NFS_OK", dirpath, name);
 	xdr_put_u32(&r->out, NFS_OK);
 	enc_fh3(&r->out, &child_nfh);
 	enc_postop_attr(&r->out, &child_nfh);
@@ -531,8 +530,7 @@ nfs3_readdir(struct req *r)
 	return PROC_GARBAGE;
 	if (count > NFS3_MAXRDIR)
 	count = NFS3_MAXRDIR;
-	const struct export *readdir_export = fh_lookup_export(&nfh);
-	if (readdir_export == NULL) {
+	if (fh_lookup_export(&nfh) == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
@@ -706,6 +704,7 @@ nfs3_readdirplus(struct req *r)
 	char fullpath[512];
 	struct stat st;
 	struct fs_fattr eattr;
+	fhandle_t fh_child;
 
 	memset(&eattr, 0, sizeof(eattr));
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
@@ -719,14 +718,19 @@ nfs3_readdirplus(struct req *r)
 	eattr.gid = st.st_gid;
 	eattr.size = st.st_size;
 	eattr.fileid = st.st_ino;
-	eattr.fsid = ((uint64_t)readdirplus_export->fsid_val[0] << 32) |
-	    readdirplus_export->fsid_val[1];
 	eattr.atime_sec = st.PORT_ST_ATIM.tv_sec;
 	eattr.atime_usec = st.PORT_ST_ATIM.tv_nsec / 1000;
 	eattr.mtime_sec = st.PORT_ST_MTIM.tv_sec;
 	eattr.mtime_usec = st.PORT_ST_MTIM.tv_nsec / 1000;
 	eattr.ctime_sec = st.PORT_ST_CTIM.tv_sec;
 	eattr.ctime_usec = st.PORT_ST_CTIM.tv_nsec / 1000;
+
+	/* Get child handle first so we can extract its fsid */
+	int have_fh = (port_lgetfh(fullpath, &fh_child) == 0);
+	if (have_fh) {
+	eattr.fsid = (((uint64_t)fh_child.fh_fsid.val[0]) << 32) |
+	    (uint64_t)(uint32_t)fh_child.fh_fsid.val[1];
+	}
 
 	size_t namelen = strlen(name);
 	size_t entry_size = 4 + 8 + 4 + XDR_PAD(namelen) + 8 + 88 + 88;
@@ -746,9 +750,8 @@ nfs3_readdirplus(struct req *r)
 	nfs3_enc_fattr(&r->out, &eattr);
 	/* name_handle: post_op_fh3 (handle_follows + fhandle3) */
 	{
-	fhandle_t fh_child;
 	struct nfs_fh child_nfh;
-	if (port_lgetfh(fullpath, &fh_child) == 0) {
+	if (have_fh) {
 	fh_encode(&child_nfh, &fh_child);
 	fh_path_cache_add(&child_nfh, fullpath);
 	xdr_put_u32(&r->out, 1);  /* handle_follows */
@@ -769,7 +772,6 @@ nfs3_readdirplus(struct req *r)
 	xdr_put_u32(&r->out, eof_reached ? 1 : 0);
 
 	(void)closedir(dirp);
-	log_msg(L_DEBUG, "READDIRPLUS done eof=%d", eof_reached);
 	return PROC_OK;
 }
 
