@@ -32,7 +32,7 @@ const struct export *fh_lookup_export(const struct nfs_fh *nfh);
  * This is needed because fhopen follows symlinks, making it impossible
  * to read the symlink target from the file handle alone.
  */
-#define FH_PATH_CACHE_SIZE 64
+#define FH_PATH_CACHE_SIZE 4096
 void fh_path_cache_add(const struct nfs_fh *nfh, const char *path);
 const char *fh_path_cache_get(const struct nfs_fh *nfh);
 
