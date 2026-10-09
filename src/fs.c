@@ -73,16 +73,14 @@ fs_open(const fhandle_t *fh, int flags)
 ssize_t
 fs_read(int fd, void *buf, size_t len, off_t offset)
 {
-	off_t off;
+	ssize_t n;
 
-	off = lseek(fd, offset, SEEK_SET);
-	if (off < 0)
+	if (len > (size_t)SSIZE_MAX)
+	len = (size_t)SSIZE_MAX;
+	n = pread(fd, buf, len, offset);
+	if (n < 0)
 	return -errno;
-	if ((ssize_t)len > SSIZE_MAX)
-	len = SSIZE_MAX;
-	if (read(fd, buf, len) < 0)
-	return -errno;
-	return 0;
+	return n;	/* bytes read; 0 means end of file */
 }
 
 ssize_t
@@ -142,7 +140,7 @@ int
 fs_lookup(const struct export *ex, const char *path,
     fhandle_t *outfh, int *is_symlink)
 {
-	char rp[MAX_PATH_LEN];
+	char rp[REALPATH_BUF_LEN];
 	struct stat sb;
 	const char *expath = ex->path;
 	size_t elen;
@@ -173,12 +171,12 @@ fs_lookup(const struct export *ex, const char *path,
 	}
 
 	/* Build relative path */
-	strcpy(relpath, path + elen + 1);
+	strlcpy(relpath, path + elen + 1, sizeof(relpath));
 
 	/* Walk the path component by component */
 	if (port_lgetfh(expath, &curfh) < 0)
 	return errno;
-	strcpy(curpath, expath);
+	strlcpy(curpath, expath, sizeof(curpath));
 
 	save = relpath;
 	while ((comp = strtok_r(save, "/", &save)) != NULL) {
@@ -196,7 +194,7 @@ fs_lookup(const struct export *ex, const char *path,
 	return errno;
 	if (!S_ISDIR(sb.st_mode))
 	return ENOTDIR;
-	strcpy(curpath, tmp);
+	strlcpy(curpath, tmp, sizeof(curpath));
 	}
 
 	if (lstat(curpath, &sb) < 0)
@@ -295,16 +293,14 @@ fs_open(const fhandle_t *fh, int flags)
 ssize_t
 fs_read(int fd, void *buf, size_t len, off_t offset)
 {
-	off_t off;
+	ssize_t n;
 
-	off = lseek(fd, offset, SEEK_SET);
-	if (off < 0)
+	if (len > (size_t)SSIZE_MAX)
+	len = (size_t)SSIZE_MAX;
+	n = pread(fd, buf, len, offset);
+	if (n < 0)
 	return -errno;
-	if ((ssize_t)len > SSIZE_MAX)
-	len = SSIZE_MAX;
-	if (read(fd, buf, len) < 0)
-	return -errno;
-	return 0;
+	return n;	/* bytes read; 0 means end of file */
 }
 
 ssize_t
@@ -389,13 +385,116 @@ fs_seekdir(DIR *dirp, long offset)
 #endif /* __FreeBSD__ */
 
 int
-fs_access(const struct fs_fattr *attr, uint32_t uid, uint32_t gid,
-    int mode)
+fs_setattr_path(const char *path, const struct fs_setattr *sa)
 {
-	/* For now, grant all access (no credential checking) */
-	(void)attr;
-	(void)uid;
-	(void)gid;
-	(void)mode;
-	return 0;
+	struct stat sb;
+	int lnk, err = 0;
+
+	if (lstat(path, &sb) < 0)
+		return errno;
+	lnk = S_ISLNK(sb.st_mode);
+
+	if (sa->have_size) {
+		if (lnk)
+			return EINVAL;
+		if (truncate(path, (off_t)sa->size) < 0)
+			return errno;
+	}
+	if (sa->have_mode && !lnk) {
+		if (chmod(path, (mode_t)(sa->mode & 07777)) < 0)
+			return errno;
+	}
+	if (sa->have_uid || sa->have_gid) {
+		if (lchown(path, sa->have_uid ? (uid_t)sa->uid : (uid_t)-1,
+		    sa->have_gid ? (gid_t)sa->gid : (gid_t)-1) < 0)
+			return errno;
+	}
+	if (sa->atime_mode != 0 || sa->mtime_mode != 0) {
+		struct timeval tv[2], now;
+
+		gettimeofday(&now, NULL);
+		tv[0].tv_sec = sb.PORT_ST_ATIM.tv_sec;
+		tv[0].tv_usec = sb.PORT_ST_ATIM.tv_nsec / 1000;
+		tv[1].tv_sec = sb.PORT_ST_MTIM.tv_sec;
+		tv[1].tv_usec = sb.PORT_ST_MTIM.tv_nsec / 1000;
+		if (sa->atime_mode == 1)
+			tv[0] = now;
+		else if (sa->atime_mode == 2) {
+			tv[0].tv_sec = (time_t)sa->atime_sec;
+			tv[0].tv_usec = sa->atime_usec;
+		}
+		if (sa->mtime_mode == 1)
+			tv[1] = now;
+		else if (sa->mtime_mode == 2) {
+			tv[1].tv_sec = (time_t)sa->mtime_sec;
+			tv[1].tv_usec = sa->mtime_usec;
+		}
+		if (lutimes(path, tv) < 0)
+			err = errno;
+	}
+	return err;
+}
+
+int
+fs_unlink(const char *path)
+{
+	int rc = unlink(path);
+
+	if (rc == 0)
+	fh_path_cache_forget(path);
+	return rc;
+}
+
+int
+fs_rmdir(const char *path)
+{
+	int rc = rmdir(path);
+
+	if (rc == 0)
+	fh_path_cache_forget(path);
+	return rc;
+}
+
+int
+fs_rename(const char *from, const char *to)
+{
+	int rc = rename(from, to);
+
+	if (rc == 0)
+	fh_path_cache_rename(from, to);
+	return rc;
+}
+
+int
+fs_access_groups(const struct fs_fattr *attr, uint32_t uid, uint32_t gid,
+    const uint32_t *gids, unsigned ngids, int mode)
+{
+	int want = (mode > 7) ? ((mode >> 6) & 7) : (mode & 7);
+	int have;
+	unsigned i;
+
+	if (want == 0)
+		return 0;
+	if (uid == 0) {
+		if ((want & 1) && !S_ISDIR(attr->mode) &&
+		    (attr->mode & 0111) == 0)
+			return -EACCES;
+		return 0;
+	}
+	if (uid == attr->uid) {
+		have = (attr->mode >> 6) & 7;
+	} else {
+		int in_group = (gid == attr->gid);
+
+		for (i = 0; !in_group && i < ngids; i++)
+			in_group = (gids[i] == attr->gid);
+		have = in_group ? ((attr->mode >> 3) & 7) : (attr->mode & 7);
+	}
+	return ((have & want) == want) ? 0 : -EACCES;
+}
+
+int
+fs_access(const struct fs_fattr *attr, uint32_t uid, uint32_t gid, int mode)
+{
+	return fs_access_groups(attr, uid, gid, NULL, 0, mode);
 }

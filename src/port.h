@@ -9,13 +9,23 @@
 #define PORT_H
 
 #ifndef __FreeBSD__
+#ifndef _BSD_SOURCE
 #define _BSD_SOURCE
+#endif
+#ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
+#endif
 #endif
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <limits.h>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
+#include <unistd.h>
 
 /* NULL may be needed before stddef.h is included */
 #ifndef NULL
@@ -49,6 +59,7 @@ port_lgetfh(const char *path, fhandle_t *fhp)
 #else /* Linux */
 
 #include <sys/statfs.h>
+#include <sys/sysmacros.h>
 
 struct linux_fhandle {
 	uint32_t fh_fsid[2];	/* fsid (2 x 32-bit) */
@@ -70,25 +81,43 @@ typedef struct linux_fhandle fhandle_t;
 #define PORT_ST_MTIM	st_mtim
 #define PORT_ST_CTIM	st_ctim
 
+/*
+ * Handle of the object "path" names, without following a final symlink
+ * (like lgetfh() on FreeBSD). statfs() always follows links, so for a
+ * symlink the filesystem is taken from the directory that holds it.
+ */
 static inline int
 port_lgetfh(const char *path, fhandle_t *fhp)
 {
 	struct stat st;
 	struct statfs sf;
-	if (stat(path, &st) < 0)
-	{
-	 return -1;
+	char dir[4096];
+	const char *fspath = path;
+
+	if (lstat(path, &st) < 0)
+		return -1;
+	if (S_ISLNK(st.st_mode)) {
+		const char *slash = strrchr(path, '/');
+		size_t n = slash == NULL ? 0 : (size_t)(slash - path);
+
+		if (slash == NULL) {
+			fspath = ".";
+		} else if (n >= sizeof(dir)) {
+			errno = ENAMETOOLONG;
+			return -1;
+		} else {
+			memcpy(dir, path, n);
+			dir[n] = '\0';
+			fspath = n == 0 ? "/" : dir;
+		}
 	}
-	if (statfs(path, &sf) < 0)
-	{
-	 return -1;
-	}
-	if (fhp != NULL)
-	{
-	 fhp->fh_fsid[0] = (uint32_t)PORT_FSID_VAL0(sf);
-	 fhp->fh_fsid[1] = (uint32_t)PORT_FSID_VAL1(sf);
-	 fhp->fh_ino = st.st_ino;
-	 fhp->fh_dev = (uint32_t)st.st_dev;
+	if (statfs(fspath, &sf) < 0)
+		return -1;
+	if (fhp != NULL) {
+		fhp->fh_fsid[0] = (uint32_t)PORT_FSID_VAL0(sf);
+		fhp->fh_fsid[1] = (uint32_t)PORT_FSID_VAL1(sf);
+		fhp->fh_ino = st.st_ino;
+		fhp->fh_dev = (uint32_t)st.st_dev;
 	}
 	return 0;
 }

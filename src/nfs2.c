@@ -168,7 +168,7 @@ nfs2_lookup(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_ACCES);
 	return PROC_OK;
 	}
-	nlen = xdr_get_string(&r->in, name, sizeof(name) - 1);
+	nlen = nfs_get_name(&r->in, name, sizeof(name) - 1, 1);
 	if (!xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	if (nlen == 0 || nlen > NFS2_MAXPATHLEN) {
@@ -212,7 +212,8 @@ xdr_put_u32(&r->out, nstat);
 	if (name[0] == '.' && name[1] == '\0') {
 	memcpy(&fh, &dir_kfh, sizeof(fh));
 	} else if (name[0] == '.' && name[1] == '.' && name[2] == '\0') {
-	if (dirpath[1] == '\0') {
+	/* Stay at the export root: never leave the export. */
+	if (dirpath[1] == '\0' || strcmp(dirpath, ex->path) == 0) {
 	memcpy(&fh, &dir_kfh, sizeof(fh));
 	} else {
 	char *slash = strrchr(dirpath, '/');
@@ -276,6 +277,7 @@ xdr_put_u32(&r->out, nstat);
 static int
 nfs2_readlink(struct req *r)
 {
+	char cbuf[MAX_PATH_LEN];
 	struct nfs_fh nfh;
 	fhandle_t fh;
 	char buf[1024];
@@ -294,23 +296,12 @@ nfs2_readlink(struct req *r)
 	return PROC_OK;
 	}
 
-	/* Look up the cached path from LOOKUP */
-	cpath = fh_path_cache_get(&nfh);
-	if (cpath == NULL) {
-	/* Fallback: try fhopen + fchdir + getcwd (works for dirs) */
-	int rfd = PORT_FHOPEN(&fh, O_RDONLY);
-	if (rfd >= 0 && fchdir(rfd) == 0) {
-	char tmp[1024];
-	if (getcwd(tmp, sizeof(tmp)) != NULL) {
-	cpath = tmp; /* XXX: stack lifetime issue - not safe */
-	}
-	}
-	(void)close(rfd);
-	if (cpath == NULL) {
+	/* Path from LOOKUP (cache first: fhopen follows symlinks) */
+	if (fh_resolve_path(&nfh, cbuf, sizeof(cbuf)) < 0) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	}
+	cpath = cbuf;
 
 	if (lstat(cpath, &sb) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
@@ -415,15 +406,7 @@ nfs2_resolve_dirpath(const struct nfs_fh *nfh, fhandle_t *fh, char *dirpath, siz
 {
 	if (fh_decode(nfh, fh) < 0)
 	return -1;
-	int dfd = PORT_FHOPEN(fh, O_RDONLY);
-	if (dfd < 0)
-	return -1;
-	if (fchdir(dfd) < 0 || getcwd(dirpath, sz) == NULL) {
-	(void)close(dfd);
-	return -1;
-	}
-	(void)close(dfd);
-	return 0;
+	return fh_resolve_dirpath(nfh, dirpath, sz);
 }
 
 static int
@@ -446,7 +429,7 @@ nfs2_setattr(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&nfh)->ro) {
+	if (fh_export_ro(&nfh)) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -466,53 +449,56 @@ nfs2_setattr(struct req *r)
 	return PROC_OK;
 	}
 
-	if (mode != (uint32_t)-1) {
-	log_msg(L_WARN, "nfs2_setattr: chmod(%s, 0%o) mode=%u", cpath, mode, mode);
-	(void)chmod(cpath, mode);
-	}
-	if (uid != (uint32_t)-1 || gid != (uint32_t)-1) {
-	log_msg(L_WARN, "nfs2_setattr: lchown(%s, uid=%u, gid=%u)", cpath,
-	    uid == (uint32_t)-1 ? 0 : uid, gid == (uint32_t)-1 ? 0 : gid);
-	(void)lchown(cpath, uid == (uint32_t)-1 ? -1 : uid,
-	    gid == (uint32_t)-1 ? -1 : gid);
-	}
-	if (size != (uint32_t)-1) {
-	log_msg(L_WARN, "nfs2_setattr: truncate(%s, %u)", cpath, size);
-	(void)truncate(cpath, size);
-	}
-	if (atime_s != (uint32_t)-1 || mtime_s != (uint32_t)-1) {
-	struct timespec tv[2];
-	struct stat sb;
-	if (atime_s != (uint32_t)-1) {
-	tv[0].tv_sec = atime_s; tv[0].tv_nsec = atime_u * 1000;
-	} else {
-	if (lstat(cpath, &sb) == 0)
-	memcpy(&tv[0], &sb.PORT_ST_ATIM, sizeof(tv[0]));
-	else { tv[0].tv_sec = 0; tv[0].tv_nsec = 0; }
-	}
-	if (mtime_s != (uint32_t)-1) {
-	tv[1].tv_sec = mtime_s; tv[1].tv_nsec = mtime_u * 1000;
-	} else {
-	if (lstat(cpath, &sb) == 0)
-	memcpy(&tv[1], &sb.PORT_ST_MTIM, sizeof(tv[1]));
-	else { tv[1].tv_sec = 0; tv[1].tv_nsec = 0; }
-	}
 	{
-	struct timeval tvu[2];
-	tvu[0].tv_sec = tv[0].tv_sec; tvu[0].tv_usec = tv[0].tv_nsec / 1000;
-	tvu[1].tv_sec = tv[1].tv_sec; tvu[1].tv_usec = tv[1].tv_nsec / 1000;
-	log_msg(L_WARN, "nfs2_setattr: lutimes(%s, atime=%ld, mtime=%ld)", cpath, (long)tvu[0].tv_sec, (long)tvu[1].tv_sec);
-	(void)lutimes(cpath, tvu);
-	}
+	struct fs_setattr sa;
+	struct stat sb;
+	struct fs_fattr post;
+	int serr;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.have_mode = (mode != (uint32_t)-1); sa.mode = mode;
+	sa.have_uid = (uid != (uint32_t)-1); sa.uid = uid;
+	sa.have_gid = (gid != (uint32_t)-1); sa.gid = gid;
+	sa.have_size = (size != (uint32_t)-1); sa.size = size;
+	sa.atime_mode = (atime_s != (uint32_t)-1) ? 2 : 0;
+	sa.atime_sec = atime_s; sa.atime_usec = (int32_t)atime_u;
+	sa.mtime_mode = (mtime_s != (uint32_t)-1) ? 2 : 0;
+	sa.mtime_sec = mtime_s; sa.mtime_usec = (int32_t)mtime_u;
+	serr = fs_setattr_path(cpath, &sa);
+	if (serr != 0) {
+	xdr_put_u32(&r->out, nfs_errno((uint32_t)serr));
+	return PROC_OK;
 	}
 
-	xdr_put_u32(&r->out, NFS_OK);
+	/* attrstat: status + fattr (RFC 1094) */
+	if (lstat(cpath, &sb) < 0) {
+	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
+	}
+	memset(&post, 0, sizeof(post));
+	post.mode = sb.st_mode;
+	post.nlink = sb.st_nlink;
+	post.uid = sb.st_uid;
+	post.gid = sb.st_gid;
+	post.size = sb.st_size;
+	post.used = sb.st_blocks;
+	post.fileid = sb.st_ino;
+	post.atime_sec = sb.PORT_ST_ATIM.tv_sec;
+	post.atime_usec = sb.PORT_ST_ATIM.tv_nsec / 1000;
+	post.mtime_sec = sb.PORT_ST_MTIM.tv_sec;
+	post.mtime_usec = sb.PORT_ST_MTIM.tv_nsec / 1000;
+	post.ctime_sec = sb.PORT_ST_CTIM.tv_sec;
+	post.ctime_usec = sb.PORT_ST_CTIM.tv_nsec / 1000;
+	xdr_put_u32(&r->out, NFS_OK);
+	nfs2_enc_fattr(&r->out, &post);
+	return PROC_OK;
+	}
 }
 
 static int
 nfs2_write(struct req *r)
 {
+	char cbuf[MAX_PATH_LEN];
 	struct nfs_fh nfh;
 	fhandle_t fh;
 	uint32_t offset, count;
@@ -544,30 +530,14 @@ nfs2_write(struct req *r)
 	if (!xdr_ok(&r->in))
 	return PROC_GARBAGE;
 
-	cpath = fh_path_cache_get(&nfh);
-	if (cpath == NULL) {
-	log_msg(L_DEBUG, "WRITE: no path cache, trying fhopen");
-	/* Fallback: use fhopen + fchdir + getcwd */
-	int rfd = PORT_FHOPEN(&fh, O_RDONLY);
-	if (rfd >= 0 && fchdir(rfd) == 0) {
-	char tmp[1024];
-	if (getcwd(tmp, sizeof(tmp))) {
-	/* Add to cache */
-	fh_path_cache_add(&nfh, tmp);
-	cpath = fh_path_cache_get(&nfh);
-	}
-	(void)close(rfd);
-	} else {
-	(void)close(rfd);
-	}
-	}
+	cpath = (fh_resolve_path(&nfh, cbuf, sizeof(cbuf)) == 0) ? cbuf : NULL;
 	if (cpath == NULL) {
 	log_msg(L_DEBUG, "WRITE: still no path");
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	xdr_put_u32(&r->out, 0); xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&nfh)->ro) {
+	if (fh_export_ro(&nfh)) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	xdr_put_u32(&r->out, 0); xdr_put_u32(&r->out, 0);
 	return PROC_OK;
@@ -578,7 +548,7 @@ nfs2_write(struct req *r)
 	count = (uint32_t)wsize;
 	wbuf = r->in.base + r->in.pos;
 
-	fd = open(cpath, O_WRONLY);
+	fd = open(cpath, O_WRONLY | O_NOFOLLOW);
 	if (fd < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
 	xdr_put_u32(&r->out, 0); xdr_put_u32(&r->out, 0);
@@ -627,12 +597,12 @@ nfs2_create(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (fh_export_ro(&dir_nfh)) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
 
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -695,12 +665,12 @@ nfs2_remove(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (fh_export_ro(&dir_nfh)) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
 
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -711,7 +681,7 @@ nfs2_remove(struct req *r)
 	}
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 
-	if (unlink(fullpath) < 0) {
+	if (fs_unlink(fullpath) < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
 	return PROC_OK;
 	}
@@ -733,11 +703,11 @@ nfs2_rename(struct req *r)
 	return PROC_GARBAGE;
 	if (dec_fh(&r->in, &to_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, from_name, sizeof(from_name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, from_name, sizeof(from_name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	from_name[sizeof(from_name)-1] = '\0';
-	if (xdr_get_string(&r->in, to_name, sizeof(to_name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, to_name, sizeof(to_name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	to_name[sizeof(to_name)-1] = '\0';
@@ -746,7 +716,7 @@ nfs2_rename(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&from_nfh)->ro || fh_lookup_export(&to_nfh)->ro) {
+	if (fh_export_ro(&from_nfh) || fh_export_ro(&to_nfh)) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -759,7 +729,7 @@ nfs2_rename(struct req *r)
 	snprintf(from_full, sizeof(from_full), "%s/%s", from_path, from_name);
 	snprintf(to_full, sizeof(to_full), "%s/%s", to_path, to_name);
 
-	if (rename(from_full, to_full) < 0) {
+	if (fs_rename(from_full, to_full) < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
 	return PROC_OK;
 	}
@@ -781,7 +751,7 @@ nfs2_link(struct req *r)
 	return PROC_GARBAGE;
 	if (dec_fh(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -790,7 +760,7 @@ nfs2_link(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&file_nfh)->ro || fh_lookup_export(&dir_nfh)->ro) {
+	if (fh_export_ro(&file_nfh) || fh_export_ro(&dir_nfh)) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -841,7 +811,7 @@ nfs2_symlink(struct req *r)
 	if (!xdr_ok(&r->in))
 	return PROC_GARBAGE;
 
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -850,7 +820,7 @@ nfs2_symlink(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (fh_export_ro(&dir_nfh)) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -884,7 +854,7 @@ nfs2_mkdir(struct req *r)
 
 	if (dec_fh(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -903,7 +873,7 @@ nfs2_mkdir(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (fh_export_ro(&dir_nfh)) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -950,7 +920,7 @@ nfs2_rmdir(struct req *r)
 
 	if (dec_fh(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -959,7 +929,7 @@ nfs2_rmdir(struct req *r)
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	if (fh_lookup_export(&dir_nfh)->ro) {
+	if (fh_export_ro(&dir_nfh)) {
 	xdr_put_u32(&r->out, NFSERR_ROFS);
 	return PROC_OK;
 	}
@@ -970,7 +940,7 @@ nfs2_rmdir(struct req *r)
 	}
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 
-	if (rmdir(fullpath) < 0) {
+	if (fs_rmdir(fullpath) < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
 	return PROC_OK;
 	}

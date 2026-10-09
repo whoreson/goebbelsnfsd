@@ -28,14 +28,36 @@ int  fh_decode(const struct nfs_fh *nfh, fhandle_t *fh);
 const struct export *fh_lookup_export(const struct nfs_fh *nfh);
 
 /*
- * Path cache for symlinks: store the path when creating a file handle.
- * This is needed because fhopen follows symlinks, making it impossible
- * to read the symlink target from the file handle alone.
+ * Return 1 if the export for this handle is read-only, or if no export
+ * is usable for this client. Safe to call when the lookup fails.
+ */
+int  fh_export_ro(const struct nfs_fh *nfh);
+
+/*
+ * Path cache: handle -> path. See fh.c.
+ * A returned path stays valid until the next cache change.
  */
 #define FH_PATH_CACHE_SIZE 4096
 void fh_path_cache_add(const struct nfs_fh *nfh, const char *path);
 void fh_path_cache_add_bypath(const fhandle_t *fh, const char *path);
 const char *fh_path_cache_get(const struct nfs_fh *nfh);
 const char *fh_path_cache_getbyfh(const fhandle_t *fh);
+
+/* After REMOVE/RMDIR: drop "path" and everything below it. */
+void fh_path_cache_forget(const char *path);
+/* After RENAME: rewrite cached paths from "from" to "to". */
+void fh_path_cache_rename(const char *from, const char *to);
+
+/*
+ * Find the current path of a handle. Return 0 and fill "buf",
+ * or -1 if the path is unknown. Never changes the working directory.
+ *
+ * fh_resolve_path:    for files and symlinks. Cache first, then (FreeBSD)
+ *                     the kernel. Never use the kernel first: fhopen()
+ *                     follows symlinks.
+ * fh_resolve_dirpath: for directories. Kernel first (FreeBSD), then cache.
+ */
+int fh_resolve_path(const struct nfs_fh *nfh, char *buf, size_t sz);
+int fh_resolve_dirpath(const struct nfs_fh *nfh, char *buf, size_t sz);
 
 #endif

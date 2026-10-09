@@ -3,7 +3,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <string.h>
+#include <time.h>
 
+#include "conf.h"
+#include "drc.h"
 #include "log.h"
 #include "rpc.h"
 
@@ -126,7 +129,9 @@ rpc_handle(struct req *r, void *buf, size_t len, void *reply,
 	size_t cn;
 	const struct rpc_prog *p;
 	unsigned i;
-	int found, rc;
+	int found, rc, use_drc = 0;
+	struct drc_key dk;
+	size_t dn;
 
 	xdr_init(&r->in, buf, len);
 	xdr_init(&r->out, reply, replymax);
@@ -205,12 +210,38 @@ rpc_handle(struct req *r, void *buf, size_t len, void *reply,
 	return finish(r);
 	}
 
-	/* M4: if procs[proc].drc is set, look up the duplicate cache here. */
+	conf_set_client(r->peer.sin_addr);
+
+	/*
+	 * Non-idempotent call over UDP: if we already answered this exact
+	 * call, send the same reply and do not run the procedure again.
+	 */
+	if (p->procs[r->proc].drc && !r->is_tcp) {
+	dk.addr = r->peer.sin_addr;
+	dk.port = r->peer.sin_port;
+	dk.xid = r->xid;
+	dk.prog = r->prog;
+	dk.vers = r->vers;
+	dk.proc = r->proc;
+	dk.chk = drc_checksum(buf, len);
+	use_drc = 1;
+	if (drc_lookup(&dk, time(NULL), reply, replymax, &dn)) {
+	log_msg(L_DEBUG, "duplicate call xid=%08lx: reply repeated",
+	    (unsigned long)r->xid);
+	return dn;
+	}
+	}
+
 	put_accepted(&r->out, r->xid, AS_SUCCESS);
 	rc = p->procs[r->proc].fn(r);
 
-	if (rc == PROC_OK)
-	return finish(r);
+	if (rc == PROC_OK) {
+	size_t n = finish(r);
+
+	if (use_drc && n > 0)
+	drc_store(&dk, time(NULL), reply, n);
+	return n;
+	}
 	if (rc == PROC_GARBAGE || rc == PROC_UNAVAIL) {
 	xdr_init(&r->out, reply, replymax);
 	put_accepted(&r->out, r->xid,

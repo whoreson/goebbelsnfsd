@@ -125,23 +125,23 @@ nfs3_getattr(struct req *r)
 	return PROC_OK;
 }
 
-/* SETATTR - read-only, always fail */
+/* SETATTR */
 static int
 nfs3_setattr(struct req *r)
 {
+	char cbuf[MAX_PATH_LEN];
 	struct nfs_fh nfh;
 	fhandle_t fh;
 	struct fs_fattr pre_attr, post_attr;
 	const struct export *ex;
 	const char *cpath;
-	int e;
 	uint32_t mode_set, uid_set, gid_set, size_set;
-	uint32_t atime_set, mtime_set;
+	uint32_t atime_set = 0, mtime_set = 0;
 	uint32_t guard_size_set, guard_mtime_set;
-	uint32_t new_mode, new_uid, new_gid;
-	uint64_t new_size;
-	uint64_t atime_s, atime_ns, mtime_s, mtime_ns;
-	uint64_t guard_mtime_s, guard_mtime_ns, guard_size;
+	uint32_t new_mode = 0, new_uid = 0, new_gid = 0;
+	uint64_t new_size = 0;
+	uint64_t atime_s = 0, atime_ns = 0, mtime_s = 0, mtime_ns = 0;
+	uint64_t guard_mtime_s = 0, guard_mtime_ns = 0, guard_size = 0;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
@@ -183,76 +183,46 @@ nfs3_setattr(struct req *r)
 
 	/* Guard check */
 	if (guard_size_set && pre_attr.size != guard_size) {
-	xdr_put_u32(&r->out, NFSERR_GARBAGE);
+	xdr_put_u32(&r->out, NFSERR_NOT_SYNC);
 	return PROC_OK;
 	}
 	if (guard_mtime_set) {
 	if ((uint64_t)pre_attr.mtime_sec != guard_mtime_s ||
 	    (uint64_t)pre_attr.mtime_usec * 1000 != guard_mtime_ns) {
-	xdr_put_u32(&r->out, NFSERR_GARBAGE);
+	xdr_put_u32(&r->out, NFSERR_NOT_SYNC);
 	return PROC_OK;
 	}
 	}
 
 	/* Get path for operations */
-	cpath = fh_path_cache_get(&nfh);
-	if (cpath == NULL) {
-	/* Fallback: resolve handle via fhopen+fchdir+getcwd */
-	int dfd = PORT_FHOPEN(&fh, O_RDONLY);
-	char tmp[512];
-	if (dfd >= 0) {
-	(void)fchdir(dfd);
-	(void)close(dfd);
-	if (getcwd(tmp, sizeof(tmp)) != NULL) {
-	cpath = tmp;
-	}
-	}
-	}
+	cpath = (fh_resolve_path(&nfh, cbuf, sizeof(cbuf)) == 0) ? cbuf : NULL;
 	if (cpath == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
 
 	
-	/* Apply changes */
-	if (size_set) {
-	log_msg(L_WARN, "nfs3_setattr: truncate(%s, %llu)", cpath, (unsigned long long)new_size);
-	e = truncate(cpath, (off_t)new_size);
-	if (e < 0) {
-	xdr_put_u32(&r->out, nfs_errno(errno));
+	/* Apply changes. Symlinks are not followed (see fs_setattr_path). */
+	{
+	struct fs_setattr sa;
+	int serr;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.have_mode = mode_set; sa.mode = new_mode;
+	sa.have_uid = uid_set; sa.uid = new_uid;
+	sa.have_gid = gid_set; sa.gid = new_gid;
+	sa.have_size = size_set; sa.size = new_size;
+	sa.atime_mode = (int)atime_set;
+	sa.atime_sec = atime_s; sa.atime_usec = (int32_t)(atime_ns / 1000);
+	sa.mtime_mode = (int)mtime_set;
+	sa.mtime_sec = mtime_s; sa.mtime_usec = (int32_t)(mtime_ns / 1000);
+	serr = fs_setattr_path(cpath, &sa);
+	if (serr != 0) {
+	xdr_put_u32(&r->out, nfs_errno((uint32_t)serr));
+	nfs3_enc_pre_op_attr(&r->out, &pre_attr);
+	xdr_put_u32(&r->out, 0);	/* post_op_attr: not present */
 	return PROC_OK;
 	}
-	}
-	if (mode_set) {
-	log_msg(L_WARN, "nfs3_setattr: chmod(%s, 0%o) from mode_set=1", cpath, new_mode);
-	e = chmod(cpath, new_mode);
-	if (e < 0) {
-	xdr_put_u32(&r->out, nfs_errno(errno));
-	return PROC_OK;
-	}
-	}
-	if (uid_set || gid_set) {
-	log_msg(L_WARN, "nfs3_setattr: lchown(%s, uid=%d, gid=%d) from uid_set=%d gid_set=%d", cpath,
-	    uid_set ? new_uid : -1, gid_set ? new_gid : -1, uid_set, gid_set);
-	e = lchown(cpath, uid_set ? new_uid : -1, gid_set ? new_gid : -1);
-	if (e < 0) {
-	xdr_put_u32(&r->out, nfs_errno(errno));
-	return PROC_OK;
-	}
-	}
-	if (atime_set || mtime_set) {
-	struct timeval tv[2];
-	struct timeval now;
-	gettimeofday(&now, NULL);
-	tv[0].tv_sec = (time_t)(atime_set == 2 ? atime_s : (atime_set == 1 ? now.tv_sec : pre_attr.atime_sec));
-	tv[0].tv_usec = (suseconds_t)(atime_set == 2 ? atime_ns / 1000 : (atime_set == 1 ? now.tv_usec : pre_attr.atime_usec));
-	tv[1].tv_sec = (time_t)(mtime_set == 2 ? mtime_s : (mtime_set == 1 ? now.tv_sec : pre_attr.mtime_sec));
-	tv[1].tv_usec = (suseconds_t)(mtime_set == 2 ? mtime_ns / 1000 : (mtime_set == 1 ? now.tv_usec : pre_attr.mtime_usec));
-	log_msg(L_WARN, "nfs3_setattr: utimes(%s, atime=%ld.%06ld, mtime=%ld.%06ld) atime_set=%d mtime_set=%d",
-	    cpath, (long)tv[0].tv_sec, (long)tv[0].tv_usec, (long)tv[1].tv_sec, (long)tv[1].tv_usec, atime_set, mtime_set);
-	e = utimes(cpath, tv);
-	/* utimes errors are not fatal for setattr */
-	(void)e;
 	}
 
 	/* Get post-attr */
@@ -274,6 +244,7 @@ static int
 nfs3_lookup(struct req *r)
 {
 	struct nfs_fh nfh;
+	const struct export *ex;
 	fhandle_t fh, fh_child;
 	struct nfs_fh child_nfh;
 	char name[256];
@@ -282,12 +253,13 @@ nfs3_lookup(struct req *r)
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 1) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
 
-	if (fh_lookup_export(&nfh) == NULL) {
+	ex = fh_lookup_export(&nfh);
+	if (ex == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	enc_postop_attr(&r->out, &nfh);
 	return PROC_OK;
@@ -305,6 +277,10 @@ nfs3_lookup(struct req *r)
 	enc_postop_attr(&r->out, &nfh);
 	return PROC_OK;
 	}
+	/* ".." at the export root stays at the root: never leave the export. */
+	if (strcmp(name, "..") == 0 && strcmp(dirpath, ex->path) == 0)
+	snprintf(fullpath, sizeof(fullpath), "%s", dirpath);
+	else
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 
 	if (port_lgetfh(fullpath, &fh_child) < 0) {
@@ -994,38 +970,7 @@ nfs3_decode_sattr3_mode_uid_gid(struct xdr *x, uint32_t *mode, uint32_t *uid, ui
 static int
 nfs3_resolve_dirpath(const struct nfs_fh *nfh, char *dirpath, size_t dirpathsz)
 {
-	fhandle_t fh;
-	int dfd;
-
-	if (fh_decode(nfh, &fh) < 0)
-	return -1;
-	dfd = PORT_FHOPEN(&fh, O_RDONLY);
-	if (dfd >= 0) {
-	if (fchdir(dfd) < 0 || getcwd(dirpath, dirpathsz) == NULL) {
-	(void)close(dfd);
-	return -1;
-	}
-	(void)close(dfd);
-	return 0;
-	}
-	/* Linux fallback: use path cache */
-	{
-	const char *cpath = fh_path_cache_get(nfh);
-	if (cpath != NULL && strlen(cpath) + 1 < dirpathsz) {
-	(void)strlcpy(dirpath, cpath, dirpathsz);
-	return 0;
-	}
-	}
-#ifndef __FreeBSD__
-	{
-	const char *cpath = fh_path_cache_getbyfh(&fh);
-	if (cpath != NULL && strlen(cpath) + 1 < dirpathsz) {
-	(void)strlcpy(dirpath, cpath, dirpathsz);
-	return 0;
-	}
-	}
-#endif
-	return -1;
+	return fh_resolve_dirpath(nfh, dirpath, dirpathsz);
 }
 
 /* Helper: encode wcc_data using pre-computed fs_fattr for both pre and post */
@@ -1100,7 +1045,7 @@ nfs3_write(struct req *r)
 	}
 	xdr_get_fixed(&r->in, buf, dlen);
 
-	fd = open(cpath, O_WRONLY);
+	fd = open(cpath, O_WRONLY | O_NOFOLLOW);
 	if (fd < 0) {
 	free(buf);
 	xdr_put_u32(&r->out, nfs_errno(errno));
@@ -1174,7 +1119,7 @@ nfs3_commit(struct req *r)
 	return PROC_OK;
 	}
 
-	fd = open(cpath, O_RDONLY);
+	fd = open(cpath, O_RDONLY | O_NOFOLLOW);
 	if (fd >= 0) {
 	(void)fsync(fd);
 	(void)close(fd);
@@ -1212,7 +1157,7 @@ nfs3_create(struct req *r)
 
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -1229,12 +1174,16 @@ nfs3_create(struct req *r)
 	if (ex->ro) { xdr_put_u32(&r->out, NFSERR_ROFS); return PROC_OK; }
 
 	how_mode = xdr_get_u32(&r->in);
-	/* Decode sattr3 fields. Linux 2.4 NFSv3 client sends truncated sattr3,
-	 * so we use defaults when the data is incomplete. */
 	uint32_t new_mode = 0666, new_uid = 0, new_gid = 0;
 	int uid_set = 0, gid_set = 0;
-	if (xdr_ok(&r->in))
+
+	if (how_mode == 2) {
+	/* EXCLUSIVE: the argument is a createverf3 (8 bytes), not sattr3. */
+	(void)xdr_get_u32(&r->in); (void)xdr_get_u32(&r->in);
+	} else if (xdr_ok(&r->in)) {
+	/* UNCHECKED or GUARDED: decode sattr3. Linux 2.4 sends truncated sattr3. */
 	nfs3_decode_sattr3_mode_uid_gid(&r->in, &new_mode, &new_uid, &new_gid, &uid_set, &gid_set);
+	}
 	/* Ensure mode is never 0 (Linux 2.4 mount creates files with mode 0) */
 	if ((new_mode & 07777) == 0)
 	new_mode |= 0600;
@@ -1246,7 +1195,7 @@ nfs3_create(struct req *r)
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 
 	if (how_mode == 0) {  /* UNCHECKED */
-	fd = open(fullpath, O_CREAT | O_RDWR | O_TRUNC, new_mode);
+	fd = open(fullpath, O_CREAT | O_RDWR | O_TRUNC | O_NOFOLLOW, new_mode);
 	} else if (how_mode == 1) {  /* GUARDED */
 	fd = open(fullpath, O_CREAT | O_EXCL | O_RDWR | O_TRUNC, new_mode);
 	} else {  /* EXCLUSIVE - simplified: same as GUARDED */
@@ -1306,7 +1255,7 @@ nfs3_mkdir(struct req *r)
 
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -1394,7 +1343,7 @@ nfs3_symlink(struct req *r)
 	return PROC_GARBAGE;
 
 	/* Decode name (symlink name in directory) */
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -1491,7 +1440,7 @@ nfs3_mknod(struct req *r)
 
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -1617,7 +1566,7 @@ nfs3_remove(struct req *r)
 
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -1642,7 +1591,7 @@ nfs3_remove(struct req *r)
 	}
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 
-	if (unlink(fullpath) < 0) {
+	if (fs_unlink(fullpath) < 0) {
 	log_msg(L_DEBUG, "nfs3_remove: unlink(%s) failed: %s", fullpath, strerror(errno));
 	xdr_put_u32(&r->out, nfs_errno(errno));
 	return PROC_OK;
@@ -1675,7 +1624,7 @@ nfs3_rmdir(struct req *r)
 
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';
@@ -1700,7 +1649,7 @@ nfs3_rmdir(struct req *r)
 	}
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 
-	if (rmdir(fullpath) < 0) {
+	if (fs_rmdir(fullpath) < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
 	return PROC_OK;
 	}
@@ -1731,14 +1680,14 @@ nfs3_rename(struct req *r)
 
 	if (dec_fh3(&r->in, &from_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, from_name, sizeof(from_name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, from_name, sizeof(from_name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	from_name[sizeof(from_name)-1] = '\0';
 
 	if (dec_fh3(&r->in, &to_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, to_name, sizeof(to_name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, to_name, sizeof(to_name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	to_name[sizeof(to_name)-1] = '\0';
@@ -1777,7 +1726,7 @@ nfs3_rename(struct req *r)
 	snprintf(from_full, sizeof(from_full), "%s/%s", from_path, from_name);
 	snprintf(to_full, sizeof(to_full), "%s/%s", to_path, to_name);
 
-	if (rename(from_full, to_full) < 0) {
+	if (fs_rename(from_full, to_full) < 0) {
 	xdr_put_u32(&r->out, nfs_errno(errno));
 	return PROC_OK;
 	}
@@ -1818,7 +1767,7 @@ nfs3_link(struct req *r)
 	return PROC_GARBAGE;
 	if (dec_fh3(&r->in, &dir_nfh) < 0)
 	return PROC_GARBAGE;
-	if (xdr_get_string(&r->in, name, sizeof(name) - 1) == 0 ||
+	if (nfs_get_name(&r->in, name, sizeof(name) - 1, 0) == 0 ||
 	    !xdr_ok(&r->in))
 	return PROC_GARBAGE;
 	name[sizeof(name)-1] = '\0';

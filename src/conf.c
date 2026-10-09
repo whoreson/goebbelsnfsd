@@ -95,7 +95,7 @@ parse_exports(const char *path)
 {
 	FILE *f;
 	char line[2048];
-	char lpath[MAX_PATH_LEN];
+	char lpath[REALPATH_BUF_LEN];
 	struct export *ex;
 	char *tok, *save;
 	int rc;
@@ -146,7 +146,7 @@ parse_exports(const char *path)
 	log_msg(L_WARN, "path too long: %s", tok);
 	continue;
 	}
-	strcpy(ex->path, tok);
+	strlcpy(ex->path, tok, sizeof(ex->path));
 
 	/* Parse options */
 	while ((tok = strtok_r(NULL, " \t", &save)) != NULL) {
@@ -173,7 +173,6 @@ parse_exports(const char *path)
 	ex->maproot_gid = gid;
 	ex->maproot_set = 1;
 	} else if (strncmp(tok, "-mapall=", 8) == 0) {
-	/* Same as -maproot for now */
 	uint32_t uid, gid;
 	int ok;
 	char *dot;
@@ -191,6 +190,7 @@ parse_exports(const char *path)
 	ex->maproot_uid = uid;
 	ex->maproot_gid = gid;
 	ex->maproot_set = 1;
+	ex->mapall = 1;
 	} else if (strcmp(tok, "-network") == 0) {
 	tok = strtok_r(NULL, " \t", &save);
 	if (tok == NULL) {
@@ -229,7 +229,11 @@ parse_exports(const char *path)
 	    strerror(errno));
 	continue;
 	}
-	strcpy(ex->path, lpath);
+	if (strlen(lpath) >= sizeof(ex->path)) {
+	log_msg(L_WARN, "resolved path too long: %s", lpath);
+	continue;
+	}
+	strlcpy(ex->path, lpath, sizeof(ex->path));
 
 	if (port_lgetfh(ex->path, (fhandle_t *)0) < 0) {
 	/* We need the fsid, not the full handle. Use statfs. */
@@ -273,19 +277,80 @@ int
 
 conf_load(const char *path)
 {
-	if (path != NULL)
-	(void)strcpy(exports_file, path);
+	struct export *old = exports;
+	unsigned old_n = nexports, old_cap = exports_cap;
+	char old_file[sizeof(exports_file)];
+	int rc;
+
+	/* Parse into a new array. Keep the old one until the parse works. */
+	strlcpy(old_file, exports_file, sizeof(old_file));
+	if (path != NULL) {
+	if (strlen(path) >= sizeof(exports_file)) {
+	log_msg(L_ERR, "exports path too long");
+	return -1;
+	}
+	strlcpy(exports_file, path, sizeof(exports_file));
+	}
+	exports = NULL;
 	nexports = 0;
 	exports_cap = 0;
+
+	rc = parse_exports(path);
+	if (rc < 0) {
 	free(exports);
-	exports = NULL;
-	return parse_exports(path);
+	exports = old;
+	nexports = old_n;
+	exports_cap = old_cap;
+	strlcpy(exports_file, old_file, sizeof(exports_file));
+	return -1;
+	}
+	free(old);
+	return rc;
 }
 
 int
 conf_reload(void)
 {
 	return conf_load(NULL);
+}
+
+static struct in_addr cur_client;
+
+int
+conf_client_ok(const struct export *ex, struct in_addr client)
+{
+	if (ex->net.s_addr == htonl(0))
+		return 1;	/* no -network option: any client */
+	return (client.s_addr & ex->mask.s_addr) == ex->net.s_addr;
+}
+
+void
+conf_set_client(struct in_addr client)
+{
+	cur_client = client;
+}
+
+struct in_addr
+conf_get_client(void)
+{
+	return cur_client;
+}
+
+void
+conf_map_cred(const struct export *ex, uint32_t *uid, uint32_t *gid)
+{
+	if (ex->mapall) {
+		*uid = ex->maproot_uid;
+		*gid = ex->maproot_gid;
+	} else if (*uid == 0) {
+		if (ex->maproot_set) {
+			*uid = ex->maproot_uid;
+			*gid = ex->maproot_gid;
+		} else {
+			*uid = CONF_NOBODY_UID;
+			*gid = CONF_NOBODY_GID;
+		}
+	}
 }
 
 const struct export *
@@ -297,11 +362,8 @@ conf_lookup(const char *path, struct in_addr client)
 	for (i = 0; i < nexports; i++) {
 	ex = &exports[i];
 
-	/* Check network access */
-	if (ex->net.s_addr != htonl(0)) {
-	if ((client.s_addr & ex->mask.s_addr) != ex->net.s_addr)
+	if (!conf_client_ok(ex, client))
 	continue;
-	}
 
 	/* Check path */
 	if (ex->alldirs) {
@@ -310,7 +372,7 @@ conf_lookup(const char *path, struct in_addr client)
 	if (strncmp(path, ex->path, elen) == 0 &&
 	    (path[elen] == '\0' || path[elen] == '/')) {
 	/* Verify same filesystem via realpath */
-	char rp[MAX_PATH_LEN];
+	char rp[REALPATH_BUF_LEN];
 	struct statfs sf1, sf2;
 	if (realpath(path, rp) == NULL)
 	continue;

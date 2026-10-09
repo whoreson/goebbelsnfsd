@@ -5,3 +5,10 @@ tests/probe_fh
 *.bak
 unfsd.core
 unfsd.log
+tests/nfsstat_test
+tests/fh_test
+tests/pathcache_test
+tests/drc_test
+tests/rpc_drc_test
+tests/setattr_test
+tests/net_idle_test

@@ -12,6 +12,7 @@
 const uint8_t nfs_pad = 0;
 
 #ifndef HAVE_STRLCPY
+/* Copy at most siz-1 bytes. Return strlen(src): result >= siz means cut. */
 size_t
 strlcpy(char *dst, const char *src, size_t siz)
 {
@@ -20,18 +21,23 @@ strlcpy(char *dst, const char *src, size_t siz)
 	size_t n = siz;
 
 	if (n != 0) {
-	 while (--n != 0) {
-	 if ((*d++ = *s++) == '\0')
-	 break;
-	 }
+		while (--n != 0) {
+			if ((*d++ = *s++) == '\0')
+				break;
+		}
 	}
-	if (n == 0 && siz != 0)
-	 *d = '\0';
+	if (n == 0) {
+		if (siz != 0)
+			*d = '\0';
+		while (*s++ != '\0')
+			;
+	}
 	return (size_t)(s - src - 1);
 }
 #endif
 
 #ifndef HAVE_STRLCAT
+/* Append src. Return the length it tried to make: result >= siz means cut. */
 size_t
 strlcat(char *dst, const char *src, size_t siz)
 {
@@ -41,18 +47,47 @@ strlcat(char *dst, const char *src, size_t siz)
 	size_t dlen;
 
 	while (n-- != 0 && *d != '\0')
-	 d++;
-	n = n;
-	for (dlen = (size_t)(d - dst); *s != '\0'; s++)
-	 if (n > 1) {
-	 *d++ = *s;
-	 n--;
-	 }
-	if (n != 0)
-	 *d = '\0';
+		d++;
+	dlen = (size_t)(d - dst);
+	n = siz - dlen;
+	if (n == 0)
+		return dlen + strlen(s);
+	while (*s != '\0') {
+		if (n != 1) {
+			*d++ = *s;
+			n--;
+		}
+		s++;
+	}
+	*d = '\0';
 	return dlen + (size_t)(s - src);
 }
 #endif
+
+int
+nfs_name_ok(const char *name, int allow_dots)
+{
+	if (name[0] == '\0' || strchr(name, '/') != NULL)
+		return 0;
+	if (name[0] == '.' && (name[1] == '\0' ||
+	    (name[1] == '.' && name[2] == '\0')))
+		return allow_dots;
+	return 1;
+}
+
+size_t
+nfs_get_name(struct xdr *x, char *out, size_t maxlen, int allow_dots)
+{
+	size_t n = xdr_get_string(x, out, maxlen);
+
+	if (!xdr_ok(x) || n == 0)
+		return 0;
+	if (!nfs_name_ok(out, allow_dots)) {
+		x->err = 1;	/* answered as GARBAGE_ARGS by the caller */
+		return 0;
+	}
+	return n;
+}
 
 uint32_t
 nfs_mode_to_type(uint32_t mode)
@@ -73,22 +108,30 @@ uint32_t
 nfs_errno(uint32_t e)
 {
 	switch (e) {
-	case 0:	 return NFS_OK;
-	case EPERM:	 return NFSERR_PERM;
-	case ENOENT:	 return NFSERR_NOENT;
-	case EIO:	 return NFSERR_IO;
-	case ENXIO:	 return NFSERR_NXIO;
-	case EACCES:	 return NFSERR_ACCES;
-	case EEXIST:	 return NFSERR_EXIST;
-	case EXDEV:	 return NFSERR_XDEV;
-	case ENODEV:	 return NFSERR_NODEV;
-	case ENOTDIR:	 return NFSERR_NOTDIR;
-	case EISDIR:	 return NFSERR_ISDIR;
-	case EINVAL:	 return NFSERR_INVAL;
+	case 0:		return NFS_OK;
+	case EPERM:	return NFSERR_PERM;
+	case ENOENT:	return NFSERR_NOENT;
+	case EIO:	return NFSERR_IO;
+	case ENXIO:	return NFSERR_NXIO;
+	case EACCES:	return NFSERR_ACCES;
+	case EEXIST:	return NFSERR_EXIST;
+	case EXDEV:	return NFSERR_XDEV;
+	case ENODEV:	return NFSERR_NODEV;
+	case ENOTDIR:	return NFSERR_NOTDIR;
+	case EISDIR:	return NFSERR_ISDIR;
+	case EINVAL:	return NFSERR_INVAL;
+	case EFBIG:	return NFSERR_FBIG;
+	case ENOSPC:	return NFSERR_NOSPC;
+	case EROFS:	return NFSERR_ROFS;
+	case EMLINK:	return NFSERR_MLINK;
 	case ENAMETOOLONG: return NFSERR_NAMETOOLONG;
-	case ENOTEMPTY: return NFSERR_NOTEMPTY;
-	case EDQUOT: return NFSERR_DQUOT;
-	default:	 return NFSERR_PERM;
+	case ENOTEMPTY:	return NFSERR_NOTEMPTY;
+	case EDQUOT:	return NFSERR_DQUOT;
+	case ESTALE:	return NFSERR_STALE;
+	case ELOOP:	return NFSERR_IO;
+	case ENOSYS:
+	case EOPNOTSUPP:	return NFSERR_NOTSUPP;
+	default:	return NFSERR_IO;	/* unknown errno is a server fault, not EPERM */
 	}
 }
 

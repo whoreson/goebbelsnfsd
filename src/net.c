@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "log.h"
@@ -28,6 +29,7 @@ struct conn {
 	int                last;
 	size_t             inlen;
 	size_t             outlen, outpos;
+	time_t             last_active;
 	unsigned char      in[RPC_MAXMSG];
 	unsigned char      out[RPC_MAXMSG + 4];
 };
@@ -39,6 +41,14 @@ static int lsocks[MAXSOCKS];
 static unsigned nlisten;
 static struct conn conns[MAXCONN];
 static int conns_ready;
+static int idle_secs = 300;
+#define TCP_FULL_IDLE_SECS	30	/* when the table is full */
+
+void
+net_set_idle_timeout(int secs)
+{
+	idle_secs = secs;
+}
 
 static unsigned char rbuf[RPC_MAXMSG];
 static unsigned char sbuf[RPC_MAXMSG];
@@ -59,7 +69,7 @@ int
 net_udp_open(unsigned short port)
 {
 	struct sockaddr_in sin;
-	int fd, on, bufsz, fl;
+	int fd, bufsz, fl;
 
 	if (nsocks >= MAXSOCKS)
 	return -1;
@@ -69,9 +79,11 @@ net_udp_open(unsigned short port)
 	return -1;
 	}
 #ifdef IP_RECVDSTADDR
-	on = 1;
+	{
+	int on = 1;
 	if (setsockopt(fd, IPPROTO_IP, IP_RECVDSTADDR, &on, sizeof(on)) < 0)
 	log_msg(L_WARN, "IP_RECVDSTADDR: %s", strerror(errno));
+	}
 #endif
 	bufsz = 262144;
 	(void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsz, sizeof(bufsz));
@@ -243,10 +255,24 @@ tcp_accept(int lfd)
 	break;
 	}
 	if (c == NULL) {
+	/* Table full: replace the connection that was quiet the longest. */
+	time_t now = time(NULL);
+	struct conn *old = &conns[0];
+
+	for (i = 1; i < MAXCONN; i++)
+	if (conns[i].last_active < old->last_active)
+	old = &conns[i];
+	if (now - old->last_active > TCP_FULL_IDLE_SECS) {
+	log_msg(L_WARN, "tcp table full, closing idle %s",
+	    inet_ntoa(old->peer.sin_addr));
+	tcp_close(old);
+	c = old;
+	} else {
 	log_msg(L_WARN, "too many tcp connections, refused %s",
 	    inet_ntoa(from.sin_addr));
 	(void)close(fd);
 	return;
+	}
 	}
 	fl = fcntl(fd, F_GETFL, 0);
 	if (fl >= 0)
@@ -256,6 +282,7 @@ tcp_accept(int lfd)
 	(void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
 	memset(c, 0, sizeof(*c));
 	c->fd = fd;
+	c->last_active = time(NULL);
 	c->peer = from;
 	c->local.s_addr = htonl(INADDR_ANY);
 	len = sizeof(loc);
@@ -377,6 +404,7 @@ tcp_event(int fd, short revents)
 	}
 	if (c == NULL)
 	return;
+	c->last_active = time(NULL);
 	if (revents & (POLLERR | POLLNVAL)) {
 	tcp_close(c);
 	return;
@@ -425,6 +453,17 @@ net_loop(volatile sig_atomic_t *quit, volatile sig_atomic_t *hup,
 	np++;
 	}
 	n = poll(pfd, np, 1000);
+	if (idle_secs > 0) {
+	time_t now = time(NULL);
+
+	for (i = 0; i < MAXCONN; i++)
+	if (conns[i].fd >= 0 && now - conns[i].last_active > idle_secs) {
+	log_msg(L_INFO, "tcp idle timeout %s:%u",
+	    inet_ntoa(conns[i].peer.sin_addr),
+	    ntohs(conns[i].peer.sin_port));
+	tcp_close(&conns[i]);
+	}
+	}
 	if (n < 0) {
 	if (errno == EINTR)
 	continue;

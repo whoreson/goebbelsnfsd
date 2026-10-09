@@ -39,7 +39,7 @@ log_open(const char *path)
 		return -1;
 	if (log_fd > 2)
 		(void)close(log_fd);
-	(void)strcpy(log_file, path);
+	strlcpy(log_file, path, sizeof(log_file));
 	log_fd = fd;
 	return 0;
 }

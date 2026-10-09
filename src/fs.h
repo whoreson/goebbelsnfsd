@@ -66,8 +66,42 @@ void fs_seekdir(DIR *dirp, long offset);
 int  fs_lookup(const struct export *ex, const char *path,
     fhandle_t *outfh, int *is_symlink);
 
-/* Check UNIX permissions. Returns 0 if allowed, -EACCES if denied. */
+/* Attribute changes for SETATTR. Time mode: 0 = keep, 1 = server time, 2 = set. */
+struct fs_setattr {
+	int       have_mode, have_uid, have_gid, have_size;
+	uint32_t  mode, uid, gid;
+	uint64_t  size;
+	int       atime_mode, mtime_mode;
+	int64_t   atime_sec, mtime_sec;
+	int32_t   atime_usec, mtime_usec;
+};
+
+/*
+ * Apply the changes to "path". A symlink is never followed: the link is
+ * changed (owner, times) or the change is refused (size: EINVAL), and
+ * mode is skipped for a link. Return 0, or the first errno.
+ */
+int  fs_setattr_path(const char *path, const struct fs_setattr *sa);
+
+/*
+ * Namespace changes. Same result as the system call (0 or -1 with errno).
+ * On success the path cache is updated, so no handle keeps an old path.
+ */
+int  fs_unlink(const char *path);
+int  fs_rmdir(const char *path);
+int  fs_rename(const char *from, const char *to);
+
+/*
+ * Check UNIX permissions for a (mapped) user.
+ * "mode" is 0..7 (r=4 w=2 x=1) or the owner form 0400/0200/0100.
+ * Return 0 if allowed, -EACCES if denied.
+ * Root (uid 0) may read and write anything; it may execute only a
+ * directory or a file that has an execute bit.
+ */
 int  fs_access(const struct fs_fattr *attr, uint32_t uid, uint32_t gid,
     int mode);
+/* Same, with the supplementary groups of the caller. */
+int  fs_access_groups(const struct fs_fattr *attr, uint32_t uid,
+    uint32_t gid, const uint32_t *gids, unsigned ngids, int mode);
 
 #endif
