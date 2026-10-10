@@ -12,3 +12,6 @@ tests/drc_test
 tests/rpc_drc_test
 tests/setattr_test
 tests/net_idle_test
+tests/dirlist_test
+tests/readdir3_test
+tests/readdir2_test
