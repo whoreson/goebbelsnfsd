@@ -8,6 +8,8 @@
 #include <utime.h>
 
 #include "conf.h"
+#include "dircache.h"
+#include "dirlist.h"
 #include "port.h"
 #include "fh.h"
 #include "fs.h"
@@ -177,22 +179,11 @@ nfs2_lookup(struct req *r)
 	}
 	/* Resolve directory path from file handle, then append name */
 	{
-	int dfd;
-	if (fh_decode(&dir_fh, &dir_kfh) < 0) {
+	if (fh_decode(&dir_fh, &dir_kfh) < 0 ||
+	    fh_resolve_dirpath(&dir_fh, dirpath, sizeof(dirpath)) < 0) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
-	dfd = PORT_FHOPEN(&dir_kfh, O_RDONLY);
-	if (dfd < 0) {
-	xdr_put_u32(&r->out, NFSERR_STALE);
-	return PROC_OK;
-	}
-	if (fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
-	(void)close(dfd);
-	xdr_put_u32(&r->out, NFSERR_IO);
-	return PROC_OK;
-	}
-	(void)close(dfd);
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 	}
 
@@ -955,14 +946,10 @@ nfs2_readdir(struct req *r)
 	struct nfs_fh nfh;
 	fhandle_t fh;
 	uint32_t offset, count;
-	DIR *dirp;
-	uint64_t inode;
-	char name[256];
-	size_t mark_pos, used = 0;
-	int rc, done = 0;
 	struct fs_fattr attr;
 	uint32_t nstat;
-	int eof_reached = 0;
+	const struct dirlist *list;
+	size_t i;
 
 	if (dec_fh(&r->in, &nfh) < 0) {
 	log_msg(L_DEBUG, "READDIR: dec_fh failed");
@@ -1009,137 +996,44 @@ xdr_put_u32(&r->out, nstat);
 	return PROC_OK;
 	}
 
-	if (fs_opendir(&fh, &dirp) < 0) {
-	log_msg(L_DEBUG, "READDIR: opendir failed");
+	/*
+	 * "offset" is the cookie of the last entry the client got (0 = start).
+	 * Cookies come from the entry names (see dirlist.h). They are not
+	 * positions and not inode numbers: the old code sent inode numbers as
+	 * cookies but used the next "offset" as the number of entries to skip.
+	 * A big directory was cut off after the first batch.
+	 */
+	list = dircache_get(&nfh, &fh, &attr, offset, DL_BITS_V2);
+	if (list == NULL) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
 
-	/* Skip to offset (cookie) */
-	while (offset > 0) {
-	rc = fs_readdir(dirp, &inode, name, sizeof(name));
-	if (rc != 0)
-	break;
-	offset--;
-	}
-	log_msg(L_DEBUG, "READDIR: offset=%u count=%u", (unsigned)offset, (unsigned)count);
-
-	/* NFSv2 READDIR reply: nfsstat + entrylist */
+	/*
+	 * NFSv2 READDIR reply (RFC 1094): status, then for each entry
+	 *   more=1, fileid, name, cookie
+	 * then more=0 and eof. The handle of an entry is not part of it;
+	 * the client uses LOOKUP.
+	 */
 	xdr_put_u32(&r->out, NFS_OK);
+	for (i = dl_after(list, offset); i < list->n; i++) {
+	const struct dl_entry *de = &list->e[i];
+	size_t entry_size = 4 + 4 + 4 + XDR_PAD(strlen(de->name)) + 4;
 
-	/* Resolve directory path from file handle */
-	{
-	int dfd;
-	char dirpath[MAX_PATH_LEN];
-	dfd = PORT_FHOPEN(&fh, O_RDONLY);
-	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
-	(void)close(dfd);
-	xdr_put_u32(&r->out, 0);  /* more=0 */
-	xdr_put_u32(&r->out, 1);  /* eof */
-	return PROC_OK;
-	}
-	(void)close(dfd);
-
-	/*
-	 * FreeBSD NFSv2 READDIR reply format:
-	 *   for each entry:
-	 *       more=1(4) + cookie(4) + namelen(4) + name(padded) + next_cookie(4)
-	 *   more=0(4)
-	 *   eof(4) = 1 if no more data, 0 if more available
-	 *
-	 * Note: fh_handle is NOT included in the NFSv2 READDIR reply.
-	 * The client uses LOOKUP to get file handles for individual entries.
-	 */
-
-	/*
-	 * Collect entries, then send them with correct next_cookie values.
-	 * Buffer up to 128 entries.
-	 */
-	{
-	struct {
-	uint32_t inode;
-	char nm[256];
-	} entries[128];
-	int nent = 0;
-
-	while (!done && nent < 128) {
-	char fullpath[MAX_PATH_LEN];
-	fhandle_t entry_fh_k;
-
-	rc = fs_readdir(dirp, &inode, name, sizeof(name));
-	if (rc != 0) {
-	done = 1;
-	eof_reached = 1;
+	/* leave room for the end of the list: more=0 and eof */
+	if (xdr_pos(&r->out) + entry_size + 8 > count)
 	break;
-	}
-	/* Skip entries we can't get a handle for */
-	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
-	if (port_lgetfh(fullpath, &entry_fh_k) < 0)
-	continue;
-
-	entries[nent].inode = (uint32_t)inode;
-	strncpy(entries[nent].nm, name, sizeof(entries[nent].nm) - 1);
-	entries[nent].nm[sizeof(entries[nent].nm) - 1] = '\0';
-	nent++;
-	}
-	log_msg(L_DEBUG, "READDIR: read %d entries from dir", nent);
-
-	/* Now send all buffered entries */
-	{
-	int ei;
-	int encoded_all = 1;
-	for (ei = 0; ei < nent; ei++) {
-	uint32_t ni = entries[ei].inode;
-	const char *en = entries[ei].nm;
-	uint32_t next_inode = (ei + 1 < nent) ? entries[ei + 1].inode : ni;
-	size_t entry_overhead = 4 + 4 + XDR_PAD(strlen(en)) + 4;
-
-	if (xdr_pos(&r->out) + entry_overhead > count + 28) {
-	/* Entry doesn't fit, stop here */
-	done = 1;
-	encoded_all = 0;
-	break;
-	}
-	/* more=1 */
 	xdr_put_u32(&r->out, 1);
-	/* cookie */
-	xdr_put_u32(&r->out, ni);
-	/* namelen + name (padded) */
-	xdr_put_string(&r->out, en);
-	/* next_cookie */
-	xdr_put_u32(&r->out, next_inode);
+	xdr_put_u32(&r->out, (uint32_t)de->inode);
+	xdr_put_string(&r->out, de->name);
+	xdr_put_u32(&r->out, (uint32_t)de->cookie);
 	}
-	/* If we didn't encode all buffered entries, there are more available */
-	if (!encoded_all)
-	eof_reached = 0;
-	}
-	}
-
-	(void)closedir(dirp);
-
-	/* more=0 */
-	xdr_put_u32(&r->out, 0);
-
-	/* eof flag: 1 = end of directory, 0 = more available */
-	if (eof_reached)
-	xdr_put_u32(&r->out, 1);  /* EOF */
-	else
-	xdr_put_u32(&r->out, 0);  /* more available */
-
-	{
-	size_t pos = xdr_pos(&r->out);
-	uint8_t *data = r->out.base;
-	size_t i;
-	log_msg(L_DEBUG, "READDIR: reply %zu bytes:", pos);
-	for (i = 0; i < pos && i < 128; i += 4) {
-	log_msg(L_DEBUG, "  %04zx: %02x%02x%02x%02x", i,
-	    data[i], data[i+1], data[i+2], data[i+3]);
-	}
-	}
-	log_msg(L_DEBUG, "READDIR: done=%d eof=%d pos=%zu", done, eof_reached, xdr_pos(&r->out));
+	xdr_put_u32(&r->out, 0);		/* more = 0 */
+	xdr_put_u32(&r->out, i >= list->n);	/* eof */
+	log_msg(L_DEBUG, "READDIR: cookie=%u eof=%d", (unsigned)offset,
+	    i >= list->n);
 	return PROC_OK;
-	}  /* end dirpath scope */
 }
 
 static int

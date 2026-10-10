@@ -18,6 +18,8 @@
 #include "fh.h"
 #include "fs.h"
 #include "conf.h"
+#include "dircache.h"
+#include "dirlist.h"
 #include "nfs_common.h"
 
 #define NFS3_MAXDATA	32768
@@ -504,22 +506,6 @@ nfs3_read(struct req *r)
 	return PROC_OK;
 }
 
-/* Directory snapshot entry for stable iteration */
-struct dir_snap_entry {
-	uint64_t inode;
-	char name[256];
-};
-
-/* Per-directory snapshot cache to keep cookies stable across calls */
-#define DIR_SNAP_CACHE_SIZE 256
-static struct {
-	struct nfs_fh dir_fh;           /* directory file handle */
-	struct dir_snap_entry *entries; /* snapshot entries */
-	uint64_t count;                 /* number of entries in snapshot */
-	int valid;                      /* whether this cache entry is valid */
-} dir_snap_cache[DIR_SNAP_CACHE_SIZE];
-static int dir_snap_cache_next = 0;
-
 /* READDIR */
 static int
 nfs3_readdir(struct req *r)
@@ -528,14 +514,10 @@ nfs3_readdir(struct req *r)
 	fhandle_t fh;
 	uint64_t cookie;
 	uint32_t count;
-	DIR *dirp;
-	uint64_t inode;
-	char name[256];
-	int rc, eof_reached = 0;
+	int eof_reached = 0;
 	struct fs_fattr attr;
-	struct dir_snap_entry *snap = NULL;
-	uint64_t snap_count = 0, snap_alloc = 0;
-	uint64_t i;
+	const struct dirlist *list;
+	size_t i;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
@@ -561,82 +543,36 @@ nfs3_readdir(struct req *r)
 	return PROC_OK;
 	}
 
-	/* Look up or create snapshot in cache */
-	{
-	int cache_idx = -1;
-	int ci;
-	for (ci = 0; ci < DIR_SNAP_CACHE_SIZE; ci++) {
-	if (dir_snap_cache[ci].valid &&
-	    memcmp(&dir_snap_cache[ci].dir_fh, &nfh, sizeof(nfh)) == 0) {
-	cache_idx = ci;
-	break;
-	}
-	}
-
-	if (cache_idx >= 0) {
-	snap = dir_snap_cache[cache_idx].entries;
-	snap_count = dir_snap_cache[cache_idx].count;
-	} else {
-	if (fs_opendir(&fh, &dirp) < 0) {
+	list = dircache_get(&nfh, &fh, &attr, cookie, DL_BITS_V3);
+	if (list == NULL) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
-	}
-	while (1) {
-	rc = fs_readdir(dirp, &inode, name, sizeof(name));
-	if (rc != 0)
-	break;
-	if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-	continue;
-	if (snap_count >= snap_alloc) {
-	snap_alloc = snap_alloc ? snap_alloc * 2 : 64;
-	snap = realloc(snap, snap_alloc * sizeof(*snap));
-	if (snap == NULL) {
-	(void)closedir(dirp);
-	xdr_put_u32(&r->out, NFSERR_IO);
-	return PROC_OK;
-	}
-	}
-	snap[snap_count].inode = inode;
-	strlcpy(snap[snap_count].name, name, sizeof(snap[snap_count].name));
-	snap_count++;
-	}
-	(void)closedir(dirp);
-
-	cache_idx = dir_snap_cache_next;
-	dir_snap_cache_next = (dir_snap_cache_next + 1) % DIR_SNAP_CACHE_SIZE;
-	free(dir_snap_cache[cache_idx].entries);
-	dir_snap_cache[cache_idx].entries = snap;
-	dir_snap_cache[cache_idx].count = snap_count;
-	dir_snap_cache[cache_idx].dir_fh = nfh;
-	dir_snap_cache[cache_idx].valid = 1;
-	}
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
 	nfs3_fix_fattr_fsid(&attr, readdir_export);
 	enc_postop_attr_fattr(&r->out, &attr);
-	xdr_put_u32(&r->out, 0);  /* cookieverf */
+	/* cookieverf: our cookies do not depend on it, so it is always 0 */
+	xdr_put_u32(&r->out, 0);
 	xdr_put_u32(&r->out, 0);
 
-	/* Write entries from snapshot */
-	for (i = cookie; i < snap_count; i++) {
-	size_t namelen = strlen(snap[i].name);
+	/* Continue after the entry that has this cookie (0 = from the start) */
+	for (i = dl_after(list, cookie); i < list->n; i++) {
+	const struct dl_entry *de = &list->e[i];
+	size_t namelen = strlen(de->name);
 	size_t entry_size = 4 + 4 + 4 + 4 + XDR_PAD(namelen) + 4 + 4;
 	if (xdr_pos(&r->out) + entry_size > count + 24) {
 	break;
 	}
-	xdr_put_u32(&r->out, 1);
-	xdr_put_u32(&r->out, 0);
-	xdr_put_u32(&r->out, (uint32_t)snap[i].inode);
-	xdr_put_string(&r->out, snap[i].name);
-	xdr_put_u32(&r->out, 0);
-	xdr_put_u32(&r->out, (uint32_t)(i + 1));
+	xdr_put_u32(&r->out, 1);	/* value follows */
+	xdr_put_u64(&r->out, de->inode);
+	xdr_put_string(&r->out, de->name);
+	xdr_put_u64(&r->out, de->cookie);
 	}
 
-	if (i >= snap_count)
+	if (i >= list->n)
 	eof_reached = 1;
 
-	/* Don't free snap - it's cached */
 
 	xdr_put_u32(&r->out, 0);  /* nextentry = false */
 	xdr_put_u32(&r->out, eof_reached ? 1 : 0);
@@ -651,29 +587,21 @@ nfs3_readdirplus(struct req *r)
 	fhandle_t fh;
 	uint64_t cookie;
 	uint32_t count;
-	DIR *dirp;
-	uint64_t inode;
-	char name[256];
-	int rc, eof_reached = 0;
+	int eof_reached = 0;
 	struct fs_fattr attr;
 	char dirpath[512];
-	int dfd;
 	uint32_t nentries = 0;
-	struct dir_snap_entry *snap = NULL;
-	uint64_t snap_count = 0, snap_alloc = 0;
-	uint64_t i;
+	const struct dirlist *list;
+	size_t i;
 
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
 	cookie = xdr_get_u64(&r->in);
 	(void)xdr_get_u32(&r->in);  /* cookieverf[0] */
 	(void)xdr_get_u32(&r->in);  /* cookieverf[1] */
-	uint32_t dircount = xdr_get_u32(&r->in);
-	uint32_t maxcount = xdr_get_u32(&r->in);
-	count = maxcount;
+	count = xdr_get_u32(&r->in);
 	if (!xdr_ok(&r->in))
 	return PROC_GARBAGE;
-	(void)dircount; /* dircount limits dir entries only, maxcount limits entire reply */
 	if (count > NFS3_MAXRDIR)
 	count = NFS3_MAXRDIR;
 	const struct export *readdirplus_export = fh_lookup_export(&nfh);
@@ -691,66 +619,15 @@ nfs3_readdirplus(struct req *r)
 	}
 
 	/* Resolve directory path for child lookups */
-	dfd = PORT_FHOPEN(&fh, O_RDONLY);
-	if (dfd < 0 || fchdir(dfd) < 0 || getcwd(dirpath, sizeof(dirpath)) == NULL) {
-	(void)close(dfd);
+	if (fh_resolve_dirpath(&nfh, dirpath, sizeof(dirpath)) < 0) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
 	}
-	(void)close(dfd);
 
-	/* Look up or create snapshot in cache */
-	{
-	int cache_idx = -1;
-	int ci;
-	for (ci = 0; ci < DIR_SNAP_CACHE_SIZE; ci++) {
-	if (dir_snap_cache[ci].valid &&
-	    memcmp(&dir_snap_cache[ci].dir_fh, &nfh, sizeof(nfh)) == 0) {
-	cache_idx = ci;
-	break;
-	}
-	}
-
-	if (cache_idx >= 0) {
-	/* Reuse existing snapshot */
-	snap = dir_snap_cache[cache_idx].entries;
-	snap_count = dir_snap_cache[cache_idx].count;
-	} else {
-	/* Create new snapshot */
-	if (fs_opendir(&fh, &dirp) < 0) {
+	list = dircache_get(&nfh, &fh, &attr, cookie, DL_BITS_V3);
+	if (list == NULL) {
 	xdr_put_u32(&r->out, NFSERR_IO);
 	return PROC_OK;
-	}
-	while (1) {
-	rc = fs_readdir(dirp, &inode, name, sizeof(name));
-	if (rc != 0)
-	break;
-	if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-	continue;
-	if (snap_count >= snap_alloc) {
-	snap_alloc = snap_alloc ? snap_alloc * 2 : 64;
-	snap = realloc(snap, snap_alloc * sizeof(*snap));
-	if (snap == NULL) {
-	(void)closedir(dirp);
-	xdr_put_u32(&r->out, NFSERR_IO);
-	return PROC_OK;
-	}
-	}
-	snap[snap_count].inode = inode;
-	strlcpy(snap[snap_count].name, name, sizeof(snap[snap_count].name));
-	snap_count++;
-	}
-	(void)closedir(dirp);
-
-	/* Store in cache */
-	cache_idx = dir_snap_cache_next;
-	dir_snap_cache_next = (dir_snap_cache_next + 1) % DIR_SNAP_CACHE_SIZE;
-	free(dir_snap_cache[cache_idx].entries);
-	dir_snap_cache[cache_idx].entries = snap;
-	dir_snap_cache[cache_idx].count = snap_count;
-	dir_snap_cache[cache_idx].dir_fh = nfh;
-	dir_snap_cache[cache_idx].valid = 1;
-	}
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);
@@ -759,18 +636,19 @@ nfs3_readdirplus(struct req *r)
 	xdr_put_u32(&r->out, 0);  /* cookieverf */
 	xdr_put_u32(&r->out, 0);
 
-	/* Write entries from snapshot starting at cookie index */
-	for (i = cookie; i < snap_count; i++) {
+	/* Continue after the entry that has this cookie (0 = from the start) */
+	for (i = dl_after(list, cookie); i < list->n; i++) {
+	const struct dl_entry *de = &list->e[i];
 	char fullpath[512];
 	struct stat st;
 	struct fs_fattr eattr;
 	fhandle_t fh_child;
 
 	memset(&eattr, 0, sizeof(eattr));
-	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, snap[i].name);
+	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, de->name);
 	if (lstat(fullpath, &st) < 0) {
-	/* Entry was deleted between snapshot and now; skip it.
-	 * The cookie still advances because we use the snapshot index. */
+	/* Entry was deleted since the listing was read: skip it. Other
+	 * cookies do not change, because they come from the names. */
 	continue;
 	}
 
@@ -779,7 +657,7 @@ nfs3_readdirplus(struct req *r)
 	eattr.uid = st.st_uid;
 	eattr.gid = st.st_gid;
 	eattr.size = st.st_size;
-	eattr.fileid = snap[i].inode;
+	eattr.fileid = de->inode;
 	eattr.atime_sec = st.PORT_ST_ATIM.tv_sec;
 	eattr.atime_usec = st.PORT_ST_ATIM.tv_nsec / 1000;
 	eattr.mtime_sec = st.PORT_ST_MTIM.tv_sec;
@@ -790,7 +668,7 @@ nfs3_readdirplus(struct req *r)
 	/* Get child handle for post_op_fh3 */
 	int have_fh = (port_lgetfh(fullpath, &fh_child) == 0);
 
-	size_t namelen = strlen(snap[i].name);
+	size_t namelen = strlen(de->name);
 	size_t entry_size = 4 + 8 + 4 + XDR_PAD(namelen) + 8 + 88 + 88;
 	if (xdr_pos(&r->out) + entry_size > count + 24) {
 	break;
@@ -798,12 +676,10 @@ nfs3_readdirplus(struct req *r)
 	/* nextentry discriminant = true (more entries follow) */
 	xdr_put_u32(&r->out, 1);
 	/* entryplus3: fileid + name + cookie + name_attributes + name_handle */
-	xdr_put_u32(&r->out, 0);
-	xdr_put_u32(&r->out, (uint32_t)snap[i].inode);
-	xdr_put_string(&r->out, snap[i].name);
-	/* cookie = next index in snapshot */
-	xdr_put_u32(&r->out, 0);
-	xdr_put_u32(&r->out, (uint32_t)(i + 1));
+	xdr_put_u64(&r->out, de->inode);
+	xdr_put_string(&r->out, de->name);
+	/* cookie: stable, from the name */
+	xdr_put_u64(&r->out, de->cookie);
 	/* name_attributes: post_op_attr (attr_follows + fattr3) */
 	xdr_put_u32(&r->out, 1);  /* attr_follows */
 	nfs3_fix_fattr_fsid(&eattr, readdirplus_export);
@@ -824,10 +700,8 @@ nfs3_readdirplus(struct req *r)
 	}
 
 	/* If we consumed all entries, set eof */
-	if (i >= snap_count)
+	if (i >= list->n)
 	eof_reached = 1;
-
-	/* Don't free snap - it's cached */
 
 	/* nextentry = false */
 	xdr_put_u32(&r->out, 0);
@@ -1174,14 +1048,20 @@ nfs3_create(struct req *r)
 	if (ex->ro) { xdr_put_u32(&r->out, NFSERR_ROFS); return PROC_OK; }
 
 	how_mode = xdr_get_u32(&r->in);
+	/* Decode sattr3 fields. Linux 2.4 NFSv3 client sends truncated sattr3,
+	 * so we use defaults when the data is incomplete. */
 	uint32_t new_mode = 0666, new_uid = 0, new_gid = 0;
 	int uid_set = 0, gid_set = 0;
-
 	if (how_mode == 2) {
-	/* EXCLUSIVE: the argument is a createverf3 (8 bytes), not sattr3. */
-	(void)xdr_get_u32(&r->in); (void)xdr_get_u32(&r->in);
+	/*
+	 * EXCLUSIVE: createhow3 holds an 8-byte createverf3, not a sattr3
+	 * (RFC 1813 3.3.8). Reading it as sattr3 turned random verifier
+	 * bytes into the mode, uid and gid of the new file.
+	 */
+	(void)xdr_get_u32(&r->in);
+	(void)xdr_get_u32(&r->in);
+	new_mode = 0644;
 	} else if (xdr_ok(&r->in)) {
-	/* UNCHECKED or GUARDED: decode sattr3. Linux 2.4 sends truncated sattr3. */
 	nfs3_decode_sattr3_mode_uid_gid(&r->in, &new_mode, &new_uid, &new_gid, &uid_set, &gid_set);
 	}
 	/* Ensure mode is never 0 (Linux 2.4 mount creates files with mode 0) */
@@ -1195,7 +1075,7 @@ nfs3_create(struct req *r)
 	snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, name);
 
 	if (how_mode == 0) {  /* UNCHECKED */
-	fd = open(fullpath, O_CREAT | O_RDWR | O_TRUNC | O_NOFOLLOW, new_mode);
+	fd = open(fullpath, O_CREAT | O_RDWR | O_TRUNC, new_mode);
 	} else if (how_mode == 1) {  /* GUARDED */
 	fd = open(fullpath, O_CREAT | O_EXCL | O_RDWR | O_TRUNC, new_mode);
 	} else {  /* EXCLUSIVE - simplified: same as GUARDED */
