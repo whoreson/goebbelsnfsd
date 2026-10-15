@@ -376,17 +376,23 @@ nfs3_readlink(struct req *r)
 	if (dec_fh3(&r->in, &nfh) < 0)
 	return PROC_GARBAGE;
 	if (fh_lookup_export(&nfh) == NULL) {
+	log_msg(L_WARN, "READLINK3: fh_lookup_export returned NULL (STALE)");
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
 	if (fh_decode(&nfh, &fh) < 0 || fs_getattr(&fh, &attr) != NFS_OK) {
+	log_msg(L_WARN, "READLINK3: fh_decode/fs_getattr failed (STALE)");
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
 	}
 
 	/* Use path cache to detect symlinks */
 	cpath = fh_path_cache_get(&nfh);
+	log_msg(L_DEBUG, "READLINK3: cpath=%s attr_mode=%o S_ISLNK(attr)=%d",
+	    cpath ? cpath : "(null)", attr.mode, S_ISLNK(attr.mode));
 	if (cpath != NULL && lstat(cpath, &sb) == 0) {
+	log_msg(L_DEBUG, "READLINK3: cache hit, lstat mode=%o S_ISLNK(lstat)=%d",
+	    sb.st_mode, S_ISLNK(sb.st_mode));
 	if (!S_ISLNK(sb.st_mode)) {
 	xdr_put_u32(&r->out, NFSERR_INVAL);
 	enc_postop_attr(&r->out, &nfh);
@@ -395,25 +401,52 @@ nfs3_readlink(struct req *r)
 	}
 	n = readlink(cpath, link, sizeof(link) - 1);
 	if (n < 0) {
+	log_msg(L_WARN, "READLINK3: readlink(%s) failed: %s", cpath, strerror(errno));
 	xdr_put_u32(&r->out, NFSERR_IO);
 	enc_postop_attr(&r->out, &nfh);
 	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
+	log_msg(L_DEBUG, "READLINK3: readlink ok, n=%zd", n);
 	} else {
+	const char *fpath;
+
+	log_msg(L_DEBUG, "READLINK3: cache miss or lstat failed");
 	if (!S_ISLNK(attr.mode)) {
 	xdr_put_u32(&r->out, NFSERR_INVAL);
 	enc_postop_attr(&r->out, &nfh);
 	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
-	n = fs_readlink(&fh, link, sizeof(link));
+	/*
+	 * Hash lookup failed. Try scanning the cache by fsid+fid (O(N)).
+	 * This handles the case where a client reuses a handle from
+	 * a previous server session, or the entry was evicted and
+	 * re-inserted with a different key due to fid_data0 padding.
+	 */
+	fpath = fh_path_cache_getbyfid(&fh);
+	if (fpath != NULL && lstat(fpath, &sb) == 0 && S_ISLNK(sb.st_mode)) {
+	log_msg(L_DEBUG, "READLINK3: cache scan found %s", fpath);
+	n = readlink(fpath, link, sizeof(link) - 1);
 	if (n < 0) {
+	log_msg(L_WARN, "READLINK3: readlink(%s) failed: %s",
+	    fpath, strerror(errno));
 	xdr_put_u32(&r->out, NFSERR_IO);
 	enc_postop_attr(&r->out, &nfh);
 	xdr_put_u32(&r->out, 0);
 	return PROC_OK;
 	}
+	log_msg(L_DEBUG, "READLINK3: readlink ok, n=%zd", n);
+	xdr_put_u32(&r->out, NFS_OK);
+	enc_postop_attr(&r->out, &nfh);
+	xdr_put_var(&r->out, link, (size_t)n);
+	return PROC_OK;
+	}
+	log_msg(L_WARN, "READLINK3: cannot resolve symlink path, returning STALE");
+	xdr_put_u32(&r->out, NFSERR_STALE);
+	enc_postop_attr(&r->out, &nfh);
+	xdr_put_u32(&r->out, 0);
+	return PROC_OK;
 	}
 
 	xdr_put_u32(&r->out, NFS_OK);

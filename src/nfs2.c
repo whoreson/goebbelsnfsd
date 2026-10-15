@@ -289,8 +289,19 @@ nfs2_readlink(struct req *r)
 
 	/* Path from LOOKUP (cache first: fhopen follows symlinks) */
 	if (fh_resolve_path(&nfh, cbuf, sizeof(cbuf)) < 0) {
+	/*
+	 * Cache miss and kernel_dirpath failed (fhopen fails for symlinks).
+	 * Try scanning the cache by fsid+fid.
+	 */
+	const char *fpath = fh_path_cache_getbyfid(&fh);
+	if (fpath == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
+	}
+	if (strlcpy(cbuf, fpath, sizeof(cbuf)) >= sizeof(cbuf)) {
+	xdr_put_u32(&r->out, NFSERR_STALE);
+	return PROC_OK;
+	}
 	}
 	cpath = cbuf;
 

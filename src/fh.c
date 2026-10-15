@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #ifdef __FreeBSD__
 #include <sys/mount.h>
 #include <sys/param.h>
@@ -171,6 +173,186 @@ fh_path_cache_getbyfh(const fhandle_t *fh)
 
 	fh_encode(&tmp, fh);
 	return fh_path_cache_get(&tmp);
+}
+
+/*
+ * Extract a 64-bit inode from a decoded fhandle_t.
+ * On FreeBSD UFS: fid_data0(16) + fid_data[0..1](16) = 32-bit LE inode.
+ * On Linux: fh_ino directly.
+ */
+static uint64_t
+fh_inode(const fhandle_t *fh)
+{
+#ifdef __FreeBSD__
+	return (uint64_t)fh->fh_fid.fid_data0 |
+	    ((uint64_t)(unsigned char)fh->fh_fid.fid_data[0] << 16) |
+	    ((uint64_t)(unsigned char)fh->fh_fid.fid_data[1] << 24);
+#else
+	return fh->fh_ino;
+#endif
+}
+
+/*
+ * Extract the device from a decoded fhandle_t.
+ * On FreeBSD: the fsid val[0] is typically the st_dev.
+ * On Linux: fh_dev directly.
+ */
+static uint64_t
+fh_device(const fhandle_t *fh)
+{
+#ifdef __FreeBSD__
+	return (uint64_t)(uint32_t)fh->fh_fsid.val[0];
+#else
+	return (uint64_t)fh->fh_dev;
+#endif
+}
+
+/*
+ * Recursively walk "pfx" looking for a file with the given dev+ino.
+ * Uses lstat so symlinks are not followed.
+ * Returns 1 and stores the path in "result" on success, 0 on failure.
+ * "depth" limits recursion to prevent infinite loops.
+ */
+static int
+fh_walk_path(const char *pfx, uint64_t want_dev, uint64_t want_ino,
+    char *result, size_t resultsz, int depth)
+{
+	DIR *dir;
+	struct dirent *ent;
+	char path[PATH_MAX];
+	size_t pfxlen;
+
+	if (depth > 16)
+	 return 0;
+
+	dir = opendir(pfx);
+	if (dir == NULL)
+	 return 0;
+
+	pfxlen = strlen(pfx);
+
+	for (;;) {
+	 errno = 0;
+	 ent = readdir(dir);
+	 if (ent == NULL)
+	 break;
+	 if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+	 continue;
+
+	 if (pfxlen + 1 + strlen(ent->d_name) + 1 >= (size_t)PATH_MAX)
+	 continue;
+
+	 snprintf(path, sizeof(path), "%s/%s", pfx, ent->d_name);
+
+	 {
+	 struct stat sb;
+	 if (lstat(path, &sb) < 0)
+	  continue;
+
+	 if ((uint64_t)sb.st_dev == want_dev &&
+	     (uint64_t)sb.st_ino == want_ino) {
+	  strlcpy(result, path, resultsz);
+	  closedir(dir);
+	  return 1;
+	 }
+
+	 /* Recurse into directories on the same device */
+	 if ((uint64_t)sb.st_dev == want_dev && S_ISDIR(sb.st_mode)) {
+	  if (fh_walk_path(path, want_dev, want_ino,
+	      result, resultsz, depth + 1)) {
+	   closedir(dir);
+	   return 1;
+	  }
+	 }
+	 }
+	}
+	closedir(dir);
+	return 0;
+}
+
+/*
+ * Brute-force search: walk all exports with matching fsid looking
+ * for the file with the given dev+ino. The result is stored in a
+ * static buffer and cached for the next call.
+ * Returns a pointer to the path on success, NULL on failure.
+ */
+static const char *
+fh_brute_force(const fhandle_t *fh)
+{
+	static char result[PATH_MAX];
+	uint64_t want_ino = fh_inode(fh);
+	uint64_t want_dev = fh_device(fh);
+	unsigned i;
+	const struct export *ex;
+
+	for (i = 0; i < conf_export_count(); i++) {
+	 ex = conf_get_export(i);
+#ifdef __FreeBSD__
+	 if (ex->fsid_val[0] != (uint32_t)fh->fh_fsid.val[0] ||
+	     ex->fsid_val[1] != (uint32_t)fh->fh_fsid.val[1])
+	  continue;
+#else
+	 if (ex->fsid_val[0] != fh->fh_fsid[0] ||
+	     ex->fsid_val[1] != fh->fh_fsid[1])
+	  continue;
+#endif
+	 log_msg(L_DEBUG, "fh_brute_force: walking %s", ex->path);
+	 if (fh_walk_path(ex->path, want_dev, want_ino,
+	     result, sizeof(result), 0)) {
+	  log_msg(L_DEBUG, "fh_brute_force: found %s", result);
+	  /* Cache for future lookups */
+	  fh_path_cache_add_bypath(fh, result);
+	  return result;
+	 }
+	}
+	return NULL;
+}
+
+/*
+ * Scan the cache for a matching fsid+platform-specific id.
+ * This is an O(N) fallback for when the hash lookup fails,
+ * e.g. after a server restart when the client reuses a handle
+ * that is no longer in the cache by key.
+ * The returned pointer stays valid until the next cache change.
+ */
+const char *
+fh_path_cache_getbyfid(const fhandle_t *fh)
+{
+	struct pc_ent *e;
+
+	for (e = pc_head; e != NULL; e = e->lnext) {
+	fhandle_t efh;
+
+	if (fh_decode(&e->key, &efh) < 0)
+	 continue;
+#ifdef __FreeBSD__
+	/* FreeBSD: compare fsid + fid_data (fid_len + fid_data0 + fid_data) */
+	if (efh.fh_fsid.val[0] != fh->fh_fsid.val[0] ||
+	    efh.fh_fsid.val[1] != fh->fh_fsid.val[1] ||
+	    efh.fh_fid.fid_len != fh->fh_fid.fid_len ||
+	    efh.fh_fid.fid_data0 != fh->fh_fid.fid_data0)
+	 continue;
+	if (memcmp(efh.fh_fid.fid_data, fh->fh_fid.fid_data,
+	    efh.fh_fid.fid_len) != 0)
+	 continue;
+#else
+	/* Linux: compare fsid + dev + ino */
+	if (efh.fh_fsid[0] != fh->fh_fsid[0] ||
+	    efh.fh_fsid[1] != fh->fh_fsid[1] ||
+	    efh.fh_dev != fh->fh_dev ||
+	    efh.fh_ino != fh->fh_ino)
+	 continue;
+#endif
+	/* match - update LRU position */
+	if (e != pc_head) {
+	pc_lru_unlink(e);
+	pc_lru_push(e);
+	}
+	return e->path;
+	}
+
+	/* Cache scan failed. Try brute-force filesystem walk. */
+	return fh_brute_force(fh);
 }
 
 /* Return 1 if "p" is "base" or is below "base". */

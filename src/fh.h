@@ -42,6 +42,7 @@ void fh_path_cache_add(const struct nfs_fh *nfh, const char *path);
 void fh_path_cache_add_bypath(const fhandle_t *fh, const char *path);
 const char *fh_path_cache_get(const struct nfs_fh *nfh);
 const char *fh_path_cache_getbyfh(const fhandle_t *fh);
+const char *fh_path_cache_getbyfid(const fhandle_t *fh);
 
 /* After REMOVE/RMDIR: drop "path" and everything below it. */
 void fh_path_cache_forget(const char *path);
