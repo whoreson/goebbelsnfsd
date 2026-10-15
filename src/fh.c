@@ -277,7 +277,7 @@ fh_walk_path(const char *pfx, uint64_t want_dev, uint64_t want_ino,
  * Returns a pointer to the path on success, NULL on failure.
  */
 static const char *
-fh_brute_force(const fhandle_t *fh)
+fh_brute_force(const struct nfs_fh *nfh, const fhandle_t *fh)
 {
 	static char result[PATH_MAX];
 	uint64_t want_ino = fh_inode(fh);
@@ -300,8 +300,8 @@ fh_brute_force(const fhandle_t *fh)
 	 if (fh_walk_path(ex->path, want_dev, want_ino,
 	     result, sizeof(result), 0)) {
 	  log_msg(L_DEBUG, "fh_brute_force: found %s", result);
-	  /* Cache for future lookups */
-	  fh_path_cache_add_bypath(fh, result);
+	  /* Cache with the original wire-format key */
+	  fh_path_cache_add(nfh, result);
 	  return result;
 	 }
 	}
@@ -316,7 +316,7 @@ fh_brute_force(const fhandle_t *fh)
  * The returned pointer stays valid until the next cache change.
  */
 const char *
-fh_path_cache_getbyfid(const fhandle_t *fh)
+fh_path_cache_getbyfid(const struct nfs_fh *nfh, const fhandle_t *fh)
 {
 	struct pc_ent *e;
 
@@ -352,7 +352,7 @@ fh_path_cache_getbyfid(const fhandle_t *fh)
 	}
 
 	/* Cache scan failed. Try brute-force filesystem walk. */
-	return fh_brute_force(fh);
+	return fh_brute_force(nfh, fh);
 }
 
 /* Return 1 if "p" is "base" or is below "base". */

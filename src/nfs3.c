@@ -424,7 +424,7 @@ nfs3_readlink(struct req *r)
 	 * a previous server session, or the entry was evicted and
 	 * re-inserted with a different key due to fid_data0 padding.
 	 */
-	fpath = fh_path_cache_getbyfid(&fh);
+	fpath = fh_path_cache_getbyfid(&nfh, &fh);
 	if (fpath != NULL && lstat(fpath, &sb) == 0 && S_ISLNK(sb.st_mode)) {
 	log_msg(L_DEBUG, "READLINK3: cache scan found %s", fpath);
 	n = readlink(fpath, link, sizeof(link) - 1);

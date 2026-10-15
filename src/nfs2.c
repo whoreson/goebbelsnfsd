@@ -293,7 +293,7 @@ nfs2_readlink(struct req *r)
 	 * Cache miss and kernel_dirpath failed (fhopen fails for symlinks).
 	 * Try scanning the cache by fsid+fid.
 	 */
-	const char *fpath = fh_path_cache_getbyfid(&fh);
+	const char *fpath = fh_path_cache_getbyfid(&nfh, &fh);
 	if (fpath == NULL) {
 	xdr_put_u32(&r->out, NFSERR_STALE);
 	return PROC_OK;
