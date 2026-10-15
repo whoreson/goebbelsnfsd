@@ -2,11 +2,11 @@ PROG=	unfsd
 
 SRCS=	src/main.c src/log.c src/xdr.c src/rpc.c src/net.c \
 	src/portmap.c src/nfs2.c src/nfs3.c src/mount.c \
-	src/conf.c src/fh.c src/fs.c src/nfs_common.c src/drc.c src/dirlist.c src/dircache.c
+	src/conf.c src/fh.c src/fs.c src/nfs_common.c src/drc.c src/dirlist.c src/dircache.c src/inx.c
 OBJS=	$(SRCS:.c=.o)
 HDRS=	src/log.h src/xdr.h src/rpc.h src/types.h src/net.h \
 	src/portmap.h src/progs.h src/conf.h src/fh.h src/fs.h \
-	src/nfs_common.h src/port.h src/drc.h src/dirlist.h src/dircache.h
+	src/nfs_common.h src/port.h src/drc.h src/dirlist.h src/dircache.h src/inx.h
 
 CC?=	cc
 UNAME_S:=$(shell uname -s)

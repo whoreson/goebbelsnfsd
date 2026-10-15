@@ -15,6 +15,7 @@
 #include "conf.h"
 #include "port.h"
 #include "log.h"
+#include "inx.h"
 
 /*
  * Path cache: file handle -> path.
@@ -296,11 +297,21 @@ fh_brute_force(const struct nfs_fh *nfh, const fhandle_t *fh)
 	     ex->fsid_val[1] != fh->fh_fsid[1])
 	  continue;
 #endif
+	 /* Try the on-disk index first */
+	 {
+	 const char *idxpath = inx_lookup(INX_PATH, want_dev, want_ino);
+	 if (idxpath != NULL) {
+	  log_msg(L_DEBUG, "fh_brute_force: index found %s", idxpath);
+	  strlcpy(result, idxpath, sizeof(result));
+	  fh_path_cache_add(nfh, result);
+	  return result;
+	 }
+	 }
+	 /* Index miss: fall back to brute-force walk */
 	 log_msg(L_DEBUG, "fh_brute_force: walking %s", ex->path);
 	 if (fh_walk_path(ex->path, want_dev, want_ino,
 	     result, sizeof(result), 0)) {
 	  log_msg(L_DEBUG, "fh_brute_force: found %s", result);
-	  /* Cache with the original wire-format key */
 	  fh_path_cache_add(nfh, result);
 	  return result;
 	 }
