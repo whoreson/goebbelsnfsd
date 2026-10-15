@@ -147,7 +147,8 @@ inx_build(const char *exportpath, const char *outfile)
 	for (i = 0; i < inx_nentries; i++) {
 	 uint64_t dev = inx_entries[i]->dev;
 	 uint64_t ino = inx_entries[i]->ino;
-	 uint32_t pathlen = (uint32_t)strlen(inx_entries[i]->path);
+	 uint32_t pathlen = (uint32_t)strlen(inx_entries[i]->path) + 1;
+	 /* pathlen includes the NUL byte */
 
 	 if (write(fd, &dev, sizeof(dev)) != (ssize_t)sizeof(dev)) goto fail;
 	 if (write(fd, &ino, sizeof(ino)) != (ssize_t)sizeof(ino)) goto fail;
