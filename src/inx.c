@@ -182,6 +182,46 @@ fail:
 static struct inx_hdr *inx_map;
 static off_t inx_mapsz;
 
+/*
+ * Attempt to preload the index file at startup.
+ * Called from main() after exports are loaded.
+ */
+void
+inx_preload(const char *infile)
+{
+	int fd;
+	struct stat sb;
+	void *map;
+
+	fd = open(infile, O_RDONLY);
+	if (fd < 0) {
+	 log_msg(L_INFO, "inx: no index file %s (will build on demand)", infile);
+	 return;
+	}
+	if (fstat(fd, &sb) < 0) {
+	 close(fd);
+	 return;
+	}
+	if (sb.st_size < (off_t)sizeof(struct inx_hdr)) {
+	 close(fd);
+	 return;
+	}
+	map = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	if (map == MAP_FAILED)
+	 return;
+
+	inx_map = (struct inx_hdr *)map;
+	inx_mapsz = sb.st_size;
+	if (inx_map->magic == INX_MAGIC)
+	 log_msg(L_INFO, "inx: loaded %u entries from %s",
+	     inx_map->count, infile);
+	else {
+	 munmap(map, sb.st_size);
+	 inx_map = NULL;
+	}
+}
+
 const char *
 inx_lookup(const char *infile, uint64_t dev, uint64_t ino)
 {

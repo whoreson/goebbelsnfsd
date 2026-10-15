@@ -13,6 +13,7 @@
 #include "log.h"
 #include "net.h"
 #include "portmap.h"
+#include "inx.h"
 #include "progs.h"
 #include "rpc.h"
 #include "types.h"
@@ -164,6 +165,7 @@ main(int argc, char **argv)
 	if (portmap_commit() < 0)
 	return 1;
 
+	inx_preload(INX_PATH);
 	log_msg(L_INFO, "started");
 	net_loop(&want_quit, &want_hup, handle_hup);
 

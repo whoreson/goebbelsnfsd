@@ -31,5 +31,6 @@
 
 int inx_build(const char *exportpath, const char *outfile);
 const char *inx_lookup(const char *infile, uint64_t dev, uint64_t ino);
+void inx_preload(const char *infile);
 
 #endif /* INX_H */
