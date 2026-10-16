@@ -40,19 +40,22 @@ handle_hup(void)
 	log_msg(L_ERR, "log reopen failed: %s", strerror(errno));
 	if (conf_reload() < 0)
 	log_msg(L_WARN, "exports reload failed, keeping old config");
+	/* Pick up a new index built by "unfsd -I". Old one stays on error. */
+	(void)inx_preload(INX_PATH);
 }
 
 static void
 usage(void)
 {
 	fprintf(stderr,
-	    "usage: unfsd [-dv] [-e exports] [-l logfile] [-m mountport]\n"
+	    "usage: unfsd [-dvI] [-e exports] [-l logfile] [-m mountport]\n"
 	    "  -d  run in background\n"
 	    "  -e  exports file (default /etc/exports)\n"
 	    "  -v  verbose: log each RPC call\n"
 	    "  -l  log to file (reopened on SIGHUP)\n"
+	    "  -I  build the symlink index (%s) and exit\n"
 	    "  -m  MOUNT port (default %d)\n",
-	    MOUNT_PORT_DEFAULT);
+	    INX_PATH, MOUNT_PORT_DEFAULT);
 	exit(2);
 }
 
@@ -88,11 +91,12 @@ main(int argc, char **argv)
 	const char *exports_file = NULL;
 	unsigned long mport = MOUNT_PORT_DEFAULT;
 	char *end;
-	int ch, background = 0, verbose = 0;
+	int ch, background = 0, verbose = 0, build_index = 0;
 
-	while ((ch = getopt(argc, argv, "de:hl:m:v")) != -1) {
+	while ((ch = getopt(argc, argv, "de:hIl:m:v")) != -1) {
 	switch (ch) {
 	case 'd': background = 1; break;
+	case 'I': build_index = 1; break;
 	case 'e': exports_file = optarg; break;
 	case 'l': logfile = optarg; break;
 	case 'm':
@@ -129,6 +133,17 @@ main(int argc, char **argv)
 	if (conf_load(exports_file) < 0) {
 	log_msg(L_ERR, "failed to load exports");
 	return 1;
+	}
+
+	if (build_index) {
+	const char *roots[256];
+	unsigned i, n = conf_export_count();
+
+	if (n > 256)
+	n = 256;
+	for (i = 0; i < n; i++)
+	roots[i] = conf_get_export(i)->path;
+	return inx_build(roots, n, INX_PATH) < 0 ? 1 : 0;
 	}
 
 	/* Generate NFSv3 write verifier */

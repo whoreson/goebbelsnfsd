@@ -271,6 +271,8 @@ fh_walk_path(const char *pfx, uint64_t want_dev, uint64_t want_ino,
 	return 0;
 }
 
+static int path_under(const char *p, const char *base);
+
 /*
  * Brute-force search: walk all exports with matching fsid looking
  * for the file with the given dev+ino. The result is stored in a
@@ -297,15 +299,30 @@ fh_brute_force(const struct nfs_fh *nfh, const fhandle_t *fh)
 	     ex->fsid_val[1] != fh->fh_fsid[1])
 	  continue;
 #endif
-	 /* Try the on-disk index first */
+	 /*
+	  * Try the on-disk index first. The index can be stale, so
+	  * check the answer: it must be inside this export, and lstat()
+	  * must still show the same symlink (dev, ino). Without this
+	  * check a stale entry would be cached for good.
+	  */
 	 {
-	 const char *idxpath = inx_lookup(INX_PATH, want_dev, want_ino);
-	 if (idxpath != NULL) {
+	 const char *idxpath = inx_lookup(want_dev, want_ino);
+	 struct stat isb;
+
+	 if (idxpath != NULL &&
+	     (ex->path[1] == '\0' || path_under(idxpath, ex->path)) &&
+	     lstat(idxpath, &isb) == 0 && S_ISLNK(isb.st_mode) &&
+	     (uint64_t)isb.st_dev == want_dev &&
+	     (uint64_t)isb.st_ino == want_ino &&
+	     strlen(idxpath) < sizeof(result)) {
 	  log_msg(L_DEBUG, "fh_brute_force: index found %s", idxpath);
 	  strlcpy(result, idxpath, sizeof(result));
 	  fh_path_cache_add(nfh, result);
 	  return result;
 	 }
+	 if (idxpath != NULL)
+	  log_msg(L_DEBUG, "fh_brute_force: stale index entry %s",
+	      idxpath);
 	 }
 	 /* Index miss: fall back to brute-force walk */
 	 log_msg(L_DEBUG, "fh_brute_force: walking %s", ex->path);

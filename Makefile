@@ -37,13 +37,14 @@ src/nfs3.o: src/nfs3.c $(HDRS)
 src/mount.o: src/mount.c $(HDRS)
 src/conf.o: src/conf.c $(HDRS)
 src/fh.o: src/fh.c $(HDRS)
+src/inx.o: src/inx.c $(HDRS)
 src/fs.o: src/fs.c $(HDRS)
 src/nfs_common.o: src/nfs_common.c $(HDRS)
 src/drc.o: src/drc.c $(HDRS)
 src/dirlist.o: src/dirlist.c $(HDRS)
 src/dircache.o: src/dircache.c $(HDRS)
 
-TESTS=	tests/xdr_test tests/nfsstat_test tests/fh_test tests/pathcache_test tests/drc_test tests/rpc_drc_test tests/setattr_test tests/net_idle_test tests/dirlist_test tests/readdir3_test tests/readdir2_test
+TESTS=	tests/xdr_test tests/nfsstat_test tests/fh_test tests/pathcache_test tests/drc_test tests/rpc_drc_test tests/setattr_test tests/net_idle_test tests/dirlist_test tests/readdir3_test tests/readdir2_test tests/inx_test
 
 tests/xdr_test: tests/xdr_test.c src/xdr.c src/xdr.h
 	$(CC) $(CFLAGS) -Isrc -o $@ tests/xdr_test.c src/xdr.c
@@ -98,6 +99,9 @@ tests/readdir2_test: tests/readdir2_test.c src/nfs2.c src/fs.c src/fh.c \
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc -o $@ tests/readdir2_test.c src/nfs2.c \
 	    src/fs.c src/fh.c src/conf.c src/log.c src/nfs_common.c src/xdr.c \
 	    src/dirlist.c src/dircache.c src/rpc.c src/drc.c
+
+tests/inx_test: tests/inx_test.c src/inx.c src/log.c src/inx.h $(HDRS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc -o $@ tests/inx_test.c src/inx.c src/log.c
 
 tests/probe_fh: tests/probe_fh.c
 	$(CC) $(CFLAGS) -o $@ tests/probe_fh.c
